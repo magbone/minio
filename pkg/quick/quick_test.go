@@ -1,20 +1,19 @@
-/*
- * Quick - Quick key value store for config files and persistent state files
- *
- * Quick (C) 2015, 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package quick
 
@@ -27,8 +26,6 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-
-	"github.com/tidwall/gjson"
 )
 
 func TestReadVersion(t *testing.T) {
@@ -505,32 +502,4 @@ func TestDeepDiff(t *testing.T) {
 	//	for i, field := range fields {
 	//		fmt.Printf("DeepDiff[%d]: %s=%v\n", i, field.Name(), field.Value())
 	//	}
-}
-
-func TestCheckDupJSONKeys(t *testing.T) {
-	testCases := []struct {
-		json       string
-		shouldPass bool
-	}{
-		{`{}`, true},
-		{`{"version" : "13"}`, true},
-		{`{"version" : "13", "version": "14"}`, false},
-		{`{"version" : "13", "credential": {"accessKey": "12345"}}`, true},
-		{`{"version" : "13", "credential": {"accessKey": "12345", "accessKey":"12345"}}`, false},
-		{`{"version" : "13", "notify": {"amqp": {"1"}, "webhook":{"3"}}}`, true},
-		{`{"version" : "13", "notify": {"amqp": {"1"}, "amqp":{"3"}}}`, false},
-		{`{"version" : "13", "notify": {"amqp": {"1":{}, "2":{}}}}`, true},
-		{`{"version" : "13", "notify": {"amqp": {"1":{}, "1":{}}}}`, false},
-	}
-
-	for i, testCase := range testCases {
-		err := doCheckDupJSONKeys(gjson.Result{}, gjson.Parse(testCase.json))
-		if testCase.shouldPass && err != nil {
-			t.Errorf("Test %d, should pass but it failed with err = %v", i+1, err)
-		}
-		if !testCase.shouldPass && err == nil {
-			t.Errorf("Test %d, should fail but it succeed.", i+1)
-		}
-	}
-
 }

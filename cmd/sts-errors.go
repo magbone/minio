@@ -1,30 +1,61 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
+	"context"
 	"encoding/xml"
 	"net/http"
+
+	xhttp "github.com/minio/minio/cmd/http"
+	"github.com/minio/minio/cmd/logger"
 )
 
 // writeSTSErrorRespone writes error headers
-func writeSTSErrorResponse(w http.ResponseWriter, err STSError) {
+func writeSTSErrorResponse(ctx context.Context, w http.ResponseWriter, isErrCodeSTS bool, errCode STSErrorCode, errCtxt error) {
+	var err STSError
+	if isErrCodeSTS {
+		err = stsErrCodes.ToSTSErr(errCode)
+	}
+	if err.Code == "InternalError" || !isErrCodeSTS {
+		aerr := getAPIError(APIErrorCode(errCode))
+		if aerr.Code != "InternalError" {
+			err.Code = aerr.Code
+			err.Description = aerr.Description
+			err.HTTPStatusCode = aerr.HTTPStatusCode
+		}
+	}
 	// Generate error response.
-	stsErrorResponse := getSTSErrorResponse(err, w.Header().Get(responseRequestIDKey))
+	stsErrorResponse := STSErrorResponse{}
+	stsErrorResponse.Error.Code = err.Code
+	stsErrorResponse.RequestID = w.Header().Get(xhttp.AmzRequestID)
+	stsErrorResponse.Error.Message = err.Description
+	if errCtxt != nil {
+		stsErrorResponse.Error.Message = errCtxt.Error()
+	}
+	var logKind logger.Kind
+	switch errCode {
+	case ErrSTSInternalError, ErrSTSNotInitialized:
+		logKind = logger.Minio
+	default:
+		logKind = logger.All
+	}
+	logger.LogIf(ctx, errCtxt, logKind)
 	encodedErrorResponse := encodeResponse(stsErrorResponse)
 	writeResponse(w, err.HTTPStatusCode, encodedErrorResponse, mimeXML)
 }
@@ -50,9 +81,12 @@ type STSErrorResponse struct {
 // STSErrorCode type of error status.
 type STSErrorCode int
 
+//go:generate stringer -type=STSErrorCode -trimprefix=Err $GOFILE
+
 // Error codes, non exhaustive list - http://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithSAML.html
 const (
 	ErrSTSNone STSErrorCode = iota
+	ErrSTSAccessDenied
 	ErrSTSMissingParameter
 	ErrSTSInvalidParameterValue
 	ErrSTSWebIdentityExpiredToken
@@ -76,6 +110,11 @@ func (e stsErrorCodeMap) ToSTSErr(errCode STSErrorCode) STSError {
 // error code to STSError structure, these fields carry respective
 // descriptions for all the error responses.
 var stsErrCodes = stsErrorCodeMap{
+	ErrSTSAccessDenied: {
+		Code:           "AccessDenied",
+		Description:    "Generating temporary credentials not allowed for this request.",
+		HTTPStatusCode: http.StatusForbidden,
+	},
 	ErrSTSMissingParameter: {
 		Code:           "MissingParameter",
 		Description:    "A required parameter for the specified action is not supplied.",
@@ -98,7 +137,7 @@ var stsErrCodes = stsErrorCodeMap{
 	},
 	ErrSTSInvalidClientGrantsToken: {
 		Code:           "InvalidClientGrantsToken",
-		Description:    "The client grants token that was passed could not be validated by Minio.",
+		Description:    "The client grants token that was passed could not be validated by MinIO.",
 		HTTPStatusCode: http.StatusBadRequest,
 	},
 	ErrSTSMalformedPolicyDocument: {
@@ -116,14 +155,4 @@ var stsErrCodes = stsErrorCodeMap{
 		Description:    "We encountered an internal error generating credentials, please try again.",
 		HTTPStatusCode: http.StatusInternalServerError,
 	},
-}
-
-// getSTSErrorResponse gets in standard error and
-// provides a encodable populated response values
-func getSTSErrorResponse(err STSError, requestID string) STSErrorResponse {
-	errRsp := STSErrorResponse{}
-	errRsp.Error.Code = err.Code
-	errRsp.Error.Message = err.Description
-	errRsp.RequestID = requestID
-	return errRsp
 }

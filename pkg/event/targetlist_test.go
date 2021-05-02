@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package event
 
@@ -34,7 +35,12 @@ func (target ExampleTarget) ID() TargetID {
 	return target.id
 }
 
-func (target ExampleTarget) Send(eventData Event) error {
+// Save - Sends event directly without persisting.
+func (target ExampleTarget) Save(eventData Event) error {
+	return target.send(eventData)
+}
+
+func (target ExampleTarget) send(eventData Event) error {
 	b := make([]byte, 1)
 	if _, err := rand.Read(b); err != nil {
 		panic(err)
@@ -49,12 +55,26 @@ func (target ExampleTarget) Send(eventData Event) error {
 	return nil
 }
 
+// Send - interface compatible method does no-op.
+func (target ExampleTarget) Send(eventKey string) error {
+	return nil
+}
+
 func (target ExampleTarget) Close() error {
 	if target.closeErr {
 		return errors.New("close error")
 	}
 
 	return nil
+}
+
+func (target ExampleTarget) IsActive() (bool, error) {
+	return false, errors.New("not connected to target server/service")
+}
+
+// HasQueueStore - No-Op. Added for interface compatibility
+func (target ExampleTarget) HasQueueStore() bool {
+	return false
 }
 
 func TestTargetListAdd(t *testing.T) {
@@ -144,40 +164,6 @@ func TestTargetListExists(t *testing.T) {
 	}
 }
 
-func TestTargetListRemove(t *testing.T) {
-	targetListCase1 := NewTargetList()
-
-	targetListCase2 := NewTargetList()
-	if err := targetListCase2.Add(&ExampleTarget{TargetID{"2", "testcase"}, false, false}); err != nil {
-		panic(err)
-	}
-
-	targetListCase3 := NewTargetList()
-	if err := targetListCase3.Add(&ExampleTarget{TargetID{"3", "testcase"}, false, true}); err != nil {
-		panic(err)
-	}
-
-	testCases := []struct {
-		targetList *TargetList
-		targetID   TargetID
-		expectErr  bool
-	}{
-		{targetListCase1, TargetID{"1", "webhook"}, false},
-		{targetListCase2, TargetID{"1", "webhook"}, false},
-		{targetListCase3, TargetID{"3", "testcase"}, true},
-	}
-
-	for i, testCase := range testCases {
-		errCh := testCase.targetList.Remove(testCase.targetID)
-		err := <-errCh
-		expectErr := (err.Err != nil)
-
-		if expectErr != testCase.expectErr {
-			t.Fatalf("test %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)
-		}
-	}
-}
-
 func TestTargetListList(t *testing.T) {
 	targetListCase1 := NewTargetList()
 
@@ -254,10 +240,13 @@ func TestTargetListSend(t *testing.T) {
 		{targetListCase4, TargetID{"4", "testcase"}, true},
 	}
 
+	resCh := make(chan TargetIDResult)
 	for i, testCase := range testCases {
-		errCh := testCase.targetList.Send(Event{}, testCase.targetID)
-		err := <-errCh
-		expectErr := (err.Err != nil)
+		testCase.targetList.Send(Event{}, map[TargetID]struct{}{
+			testCase.targetID: {},
+		}, resCh)
+		res := <-resCh
+		expectErr := (res.Err != nil)
 
 		if expectErr != testCase.expectErr {
 			t.Fatalf("test %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)

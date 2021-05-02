@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -59,7 +59,7 @@ export class ObjectsBulkActions extends React.Component {
         }
       >
         <span className="la-label">
-          <i className="fa fa-check-circle" /> {checkedObjects.length}
+          <i className="fas fa-check-circle" /> {checkedObjects.length}
           {checkedObjects.length === 1 ? " Object " : " Objects "}
           selected
         </span>
@@ -81,7 +81,7 @@ export class ObjectsBulkActions extends React.Component {
           </button>
         </span>
         <i
-          className="la-close fa fa-times"
+          className="la-close fas fa-times"
           id="close-bulk-actions"
           onClick={clearChecked}
         />

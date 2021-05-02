@@ -1,58 +1,81 @@
-/*
- * Minio Cloud Storage, (C) 2019 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package json
 
 import (
-	"bytes"
-	"encoding/csv"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"math"
+	"strconv"
 	"strings"
 
+	"github.com/bcicen/jstream"
+	csv "github.com/minio/csvparser"
 	"github.com/minio/minio/pkg/s3select/sql"
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
+
+// RawJSON is a byte-slice that contains valid JSON
+type RawJSON []byte
+
+// MarshalJSON instance for []byte that assumes that byte-slice is
+// already serialized JSON
+func (b RawJSON) MarshalJSON() ([]byte, error) {
+	return b, nil
+}
 
 // Record - is JSON record.
 type Record struct {
-	data []byte
+	// Used in Set(), Marshal*()
+	KVS jstream.KVS
+
+	SelectFormat sql.SelectObjectFormat
 }
 
 // Get - gets the value for a column name.
 func (r *Record) Get(name string) (*sql.Value, error) {
-	result := gjson.GetBytes(r.data, name)
-	switch result.Type {
-	case gjson.Null:
-		return sql.FromNull(), nil
-	case gjson.False:
-		return sql.FromBool(false), nil
-	case gjson.Number:
-		return sql.FromFloat(result.Float()), nil
-	case gjson.String:
-		return sql.FromString(result.String()), nil
-	case gjson.True:
-		return sql.FromBool(true), nil
-	}
+	// Get is implemented directly in the sql package.
+	return nil, errors.New("not implemented here")
+}
 
-	return nil, fmt.Errorf("unsupported gjson value %v; %v", result, result.Type)
+// Reset the record.
+func (r *Record) Reset() {
+	if len(r.KVS) > 0 {
+		r.KVS = r.KVS[:0]
+	}
+}
+
+// Clone the record and if possible use the destination provided.
+func (r *Record) Clone(dst sql.Record) sql.Record {
+	other, ok := dst.(*Record)
+	if !ok {
+		other = &Record{}
+	}
+	if len(other.KVS) > 0 {
+		other.KVS = other.KVS[:0]
+	}
+	other.KVS = append(other.KVS, r.KVS...)
+	return other
 }
 
 // Set - sets the value for a column name.
-func (r *Record) Set(name string, value *sql.Value) (err error) {
+func (r *Record) Set(name string, value *sql.Value) (sql.Record, error) {
 	var v interface{}
 	if b, ok := value.ToBool(); ok {
 		v = b
@@ -67,48 +90,121 @@ func (r *Record) Set(name string, value *sql.Value) (err error) {
 	} else if value.IsNull() {
 		v = nil
 	} else if b, ok := value.ToBytes(); ok {
-		v = string(b)
+		// This can either be raw json or a CSV value.
+		// Only treat objects and arrays as JSON.
+		if len(b) > 0 && (b[0] == '{' || b[0] == '[') {
+			v = RawJSON(b)
+		} else {
+			v = string(b)
+		}
+	} else if arr, ok := value.ToArray(); ok {
+		v = arr
 	} else {
-		return fmt.Errorf("unsupported sql value %v and type %v", value, value.GetTypeString())
+		return nil, fmt.Errorf("unsupported sql value %v and type %v", value, value.GetTypeString())
 	}
 
 	name = strings.Replace(name, "*", "__ALL__", -1)
-	r.data, err = sjson.SetBytes(r.data, name, v)
-	return err
+	r.KVS = append(r.KVS, jstream.KV{Key: name, Value: v})
+	return r, nil
 }
 
-// MarshalCSV - encodes to CSV data.
-func (r *Record) MarshalCSV(fieldDelimiter rune) ([]byte, error) {
+// WriteCSV - encodes to CSV data.
+func (r *Record) WriteCSV(writer io.Writer, opts sql.WriteCSVOpts) error {
 	var csvRecord []string
-	result := gjson.ParseBytes(r.data)
-	result.ForEach(func(key, value gjson.Result) bool {
-		csvRecord = append(csvRecord, value.String())
-		return true
-	})
+	for _, kv := range r.KVS {
+		var columnValue string
+		switch val := kv.Value.(type) {
+		case float64:
+			columnValue = jsonFloat(val)
+		case string:
+			columnValue = val
+		case bool, int64:
+			columnValue = fmt.Sprintf("%v", val)
+		case nil:
+			columnValue = ""
+		case RawJSON:
+			columnValue = string([]byte(val))
+		case []interface{}:
+			b, err := json.Marshal(val)
+			if err != nil {
+				return err
+			}
+			columnValue = string(b)
+		default:
+			return fmt.Errorf("Cannot marshal unhandled type: %T", kv.Value)
+		}
+		csvRecord = append(csvRecord, columnValue)
+	}
 
-	buf := new(bytes.Buffer)
-	w := csv.NewWriter(buf)
-	w.Comma = fieldDelimiter
+	w := csv.NewWriter(writer)
+	w.Comma = opts.FieldDelimiter
+	w.Quote = opts.Quote
+	w.AlwaysQuote = opts.AlwaysQuote
+	w.QuoteEscape = opts.QuoteEscape
 	if err := w.Write(csvRecord); err != nil {
-		return nil, err
+		return err
 	}
 	w.Flush()
 	if err := w.Error(); err != nil {
-		return nil, err
+		return err
 	}
 
-	data := buf.Bytes()
-	return data[:len(data)-1], nil
+	return nil
 }
 
-// MarshalJSON - encodes to JSON data.
-func (r *Record) MarshalJSON() ([]byte, error) {
-	return r.data, nil
+// Raw - returns the underlying representation.
+func (r *Record) Raw() (sql.SelectObjectFormat, interface{}) {
+	return r.SelectFormat, r.KVS
+}
+
+// WriteJSON - encodes to JSON data.
+func (r *Record) WriteJSON(writer io.Writer) error {
+	return json.NewEncoder(writer).Encode(r.KVS)
+}
+
+// Replace the underlying buffer of json data.
+func (r *Record) Replace(k interface{}) error {
+	v, ok := k.(jstream.KVS)
+	if !ok {
+		return fmt.Errorf("cannot replace internal data in json record with type %T", k)
+	}
+	r.KVS = v
+	return nil
 }
 
 // NewRecord - creates new empty JSON record.
-func NewRecord() *Record {
+func NewRecord(f sql.SelectObjectFormat) *Record {
 	return &Record{
-		data: []byte("{}"),
+		KVS:          jstream.KVS{},
+		SelectFormat: f,
 	}
+}
+
+// jsonFloat converts a float to string similar to Go stdlib formats json floats.
+func jsonFloat(f float64) string {
+	var tmp [32]byte
+	dst := tmp[:0]
+
+	// Convert as if by ES6 number to string conversion.
+	// This matches most other JSON generators.
+	// See golang.org/issue/6384 and golang.org/issue/14135.
+	// Like fmt %g, but the exponent cutoffs are different
+	// and exponents themselves are not padded to two digits.
+	abs := math.Abs(f)
+	fmt := byte('f')
+	if abs != 0 {
+		if abs < 1e-6 || abs >= 1e21 {
+			fmt = 'e'
+		}
+	}
+	dst = strconv.AppendFloat(dst, f, fmt, -1, 64)
+	if fmt == 'e' {
+		// clean up e-09 to e-9
+		n := len(dst)
+		if n >= 4 && dst[n-4] == 'e' && dst[n-3] == '-' && dst[n-2] == '0' {
+			dst[n-2] = dst[n-1]
+			dst = dst[:n-1]
+		}
+	}
+	return string(dst)
 }

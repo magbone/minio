@@ -2,94 +2,83 @@ PWD := $(shell pwd)
 GOPATH := $(shell go env GOPATH)
 LDFLAGS := $(shell go run buildscripts/gen-ldflags.go)
 
-BUILD_LDFLAGS := '$(LDFLAGS)'
+GOARCH := $(shell go env GOARCH)
+GOOS := $(shell go env GOOS)
+
+VERSION ?= $(shell git describe --tags)
+TAG ?= "minio/minio:$(VERSION)"
 
 all: build
 
 checks:
 	@echo "Checking dependencies"
 	@(env bash $(PWD)/buildscripts/checkdeps.sh)
-	@echo "Checking for project in GOPATH"
-	@(env bash $(PWD)/buildscripts/checkgopath.sh)
 
 getdeps:
-	@echo "Installing golint" && go get -u golang.org/x/lint/golint
-	@echo "Installing staticcheck" && go get -u honnef.co/go/tools/...
-	@echo "Installing misspell" && go get -u github.com/client9/misspell/cmd/misspell
+	@mkdir -p ${GOPATH}/bin
+	@which golangci-lint 1>/dev/null || (echo "Installing golangci-lint" && curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(GOPATH)/bin v1.27.0)
+	@which msgp 1>/dev/null || (echo "Installing msgp" && go get github.com/tinylib/msgp@v1.1.3)
+	@which stringer 1>/dev/null || (echo "Installing stringer" && go get golang.org/x/tools/cmd/stringer)
 
 crosscompile:
 	@(env bash $(PWD)/buildscripts/cross-compile.sh)
 
-verifiers: getdeps vet fmt lint staticcheck spelling
+verifiers: getdeps lint check-gen
 
-vet:
-	@echo "Running $@"
-	@go vet github.com/minio/minio/...
-
-fmt:
-	@echo "Running $@"
-	@gofmt -d cmd/
-	@gofmt -d pkg/
+check-gen:
+	@go generate ./... >/dev/null
+	@(! git diff --name-only | grep '_gen.go$$') || (echo "Non-committed changes in auto-generated code is detected, please commit them to proceed." && false)
 
 lint:
-	@echo "Running $@"
-	@${GOPATH}/bin/golint -set_exit_status github.com/minio/minio/cmd/...
-	@${GOPATH}/bin/golint -set_exit_status github.com/minio/minio/pkg/...
-
-staticcheck:
-	@echo "Running $@"
-	@${GOPATH}/bin/staticcheck github.com/minio/minio/cmd/...
-	@${GOPATH}/bin/staticcheck github.com/minio/minio/pkg/...
-
-spelling:
-	@${GOPATH}/bin/misspell -locale US -error `find cmd/`
-	@${GOPATH}/bin/misspell -locale US -error `find pkg/`
-	@${GOPATH}/bin/misspell -locale US -error `find docs/`
-	@${GOPATH}/bin/misspell -locale US -error `find buildscripts/`
-	@${GOPATH}/bin/misspell -locale US -error `find dockerscripts/`
+	@echo "Running $@ check"
+	@GO111MODULE=on ${GOPATH}/bin/golangci-lint cache clean
+	@GO111MODULE=on ${GOPATH}/bin/golangci-lint run --build-tags kqueue --timeout=10m --config ./.golangci.yml
 
 # Builds minio, runs the verifiers then runs the tests.
 check: test
 test: verifiers build
 	@echo "Running unit tests"
-	@CGO_ENABLED=0 go test -tags kqueue ./...
+	@GOGC=25 GO111MODULE=on CGO_ENABLED=0 go test -tags kqueue ./... 1>/dev/null
 
-verify: build
-	@echo "Verifying build"
+test-race: verifiers build
+	@echo "Running unit tests under -race"
+	@(env bash $(PWD)/buildscripts/race.sh)
+
+# Verify minio binary
+verify:
+	@echo "Verifying build with race"
+	@GO111MODULE=on CGO_ENABLED=1 go build -race -tags kqueue -trimpath --ldflags "$(LDFLAGS)" -o $(PWD)/minio 1>/dev/null
 	@(env bash $(PWD)/buildscripts/verify-build.sh)
 
-coverage: build
-	@echo "Running all coverage for minio"
-	@(env bash $(PWD)/buildscripts/go-coverage.sh)
+# Verify healing of disks with minio binary
+verify-healing:
+	@echo "Verify healing build with race"
+	@GO111MODULE=on CGO_ENABLED=1 go build -race -tags kqueue -trimpath --ldflags "$(LDFLAGS)" -o $(PWD)/minio 1>/dev/null
+	@(env bash $(PWD)/buildscripts/verify-healing.sh)
 
 # Builds minio locally.
 build: checks
 	@echo "Building minio binary to './minio'"
-	@GOFLAGS="" CGO_ENABLED=0 go build -tags kqueue --ldflags $(BUILD_LDFLAGS) -o $(PWD)/minio
-	@GOFLAGS="" CGO_ENABLED=0 go build -tags kqueue --ldflags="-s -w" -o $(PWD)/dockerscripts/healthcheck $(PWD)/dockerscripts/healthcheck.go
+	@GO111MODULE=on CGO_ENABLED=0 go build -tags kqueue -trimpath --ldflags "$(LDFLAGS)" -o $(PWD)/minio 1>/dev/null
 
-docker: build
+hotfix-vars:
+	$(eval LDFLAGS := $(shell MINIO_RELEASE="RELEASE" MINIO_HOTFIX="hotfix.$(shell git rev-parse --short HEAD)" go run buildscripts/gen-ldflags.go $(shell git describe --tags --abbrev=0 | \
+    sed 's#RELEASE\.\([0-9]\+\)-\([0-9]\+\)-\([0-9]\+\)T\([0-9]\+\)-\([0-9]\+\)-\([0-9]\+\)Z#\1-\2-\3T\4:\5:\6Z#')))
+	$(eval TAG := "minio/minio:$(shell git describe --tags --abbrev=0).hotfix.$(shell git rev-parse --short HEAD)")
+hotfix: hotfix-vars install
+
+docker-hotfix: hotfix checks
+	@echo "Building minio docker image '$(TAG)'"
 	@docker build -t $(TAG) . -f Dockerfile.dev
 
-pkg-add:
-	@echo "Adding new package $(PKG)"
-	@${GOPATH}/bin/govendor add $(PKG)
-
-pkg-update:
-	@echo "Updating new package $(PKG)"
-	@${GOPATH}/bin/govendor update $(PKG)
-
-pkg-remove:
-	@echo "Remove new package $(PKG)"
-	@${GOPATH}/bin/govendor remove $(PKG)
-
-pkg-list:
-	@$(GOPATH)/bin/govendor list
+docker: build checks
+	@echo "Building minio docker image '$(TAG)'"
+	@docker build -t $(TAG) . -f Dockerfile.dev
 
 # Builds minio and installs it to $GOPATH/bin.
 install: build
 	@echo "Installing minio binary to '$(GOPATH)/bin/minio'"
-	@mkdir -p $(GOPATH)/bin && cp $(PWD)/minio $(GOPATH)/bin/minio
+	@mkdir -p $(GOPATH)/bin && cp -f $(PWD)/minio $(GOPATH)/bin/minio
 	@echo "Installation successful. To learn more, try \"minio --help\"."
 
 clean:
@@ -99,3 +88,4 @@ clean:
 	@rm -rvf minio
 	@rm -rvf build
 	@rm -rvf release
+	@rm -rvf .verify*

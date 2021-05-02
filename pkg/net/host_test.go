@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package net
 
@@ -93,14 +94,14 @@ func TestHostMarshalJSON(t *testing.T) {
 		{Host{"play", 0, false}, []byte(`"play"`), false},
 		{Host{"play", 0, true}, []byte(`"play:0"`), false},
 		{Host{"play", 9000, true}, []byte(`"play:9000"`), false},
-		{Host{"play.minio.io", 0, false}, []byte(`"play.minio.io"`), false},
-		{Host{"play.minio.io", 9000, true}, []byte(`"play.minio.io:9000"`), false},
+		{Host{"play.min.io", 0, false}, []byte(`"play.min.io"`), false},
+		{Host{"play.min.io", 9000, true}, []byte(`"play.min.io:9000"`), false},
 		{Host{"147.75.201.93", 0, false}, []byte(`"147.75.201.93"`), false},
 		{Host{"147.75.201.93", 9000, true}, []byte(`"147.75.201.93:9000"`), false},
 		{Host{"play12", 0, false}, []byte(`"play12"`), false},
 		{Host{"12play", 0, false}, []byte(`"12play"`), false},
 		{Host{"play-minio-io", 0, false}, []byte(`"play-minio-io"`), false},
-		{Host{"play--minio.io", 0, false}, []byte(`"play--minio.io"`), false},
+		{Host{"play--min.io", 0, false}, []byte(`"play--min.io"`), false},
 	}
 
 	for i, testCase := range testCases {
@@ -129,15 +130,22 @@ func TestHostUnmarshalJSON(t *testing.T) {
 		{[]byte(`"play"`), &Host{"play", 0, false}, false},
 		{[]byte(`"play:0"`), &Host{"play", 0, true}, false},
 		{[]byte(`"play:9000"`), &Host{"play", 9000, true}, false},
-		{[]byte(`"play.minio.io"`), &Host{"play.minio.io", 0, false}, false},
-		{[]byte(`"play.minio.io:9000"`), &Host{"play.minio.io", 9000, true}, false},
+		{[]byte(`"play.min.io"`), &Host{"play.min.io", 0, false}, false},
+		{[]byte(`"play.min.io:9000"`), &Host{"play.min.io", 9000, true}, false},
 		{[]byte(`"147.75.201.93"`), &Host{"147.75.201.93", 0, false}, false},
 		{[]byte(`"147.75.201.93:9000"`), &Host{"147.75.201.93", 9000, true}, false},
 		{[]byte(`"play12"`), &Host{"play12", 0, false}, false},
 		{[]byte(`"12play"`), &Host{"12play", 0, false}, false},
 		{[]byte(`"play-minio-io"`), &Host{"play-minio-io", 0, false}, false},
-		{[]byte(`"play--minio.io"`), &Host{"play--minio.io", 0, false}, false},
-		{[]byte(`":9000"`), nil, true},
+		{[]byte(`"play--min.io"`), &Host{"play--min.io", 0, false}, false},
+		{[]byte(`":9000"`), &Host{"", 9000, true}, false},
+		{[]byte(`"[fe80::8097:76eb:b397:e067%wlp2s0]"`), &Host{"fe80::8097:76eb:b397:e067%wlp2s0", 0, false}, false},
+		{[]byte(`"[fe80::8097:76eb:b397:e067]:9000"`), &Host{"fe80::8097:76eb:b397:e067", 9000, true}, false},
+		{[]byte(`"fe80::8097:76eb:b397:e067%wlp2s0"`), nil, true},
+		{[]byte(`"fe80::8097:76eb:b397:e067%wlp2s0]"`), nil, true},
+		{[]byte(`"[fe80::8097:76eb:b397:e067%wlp2s0"`), nil, true},
+		{[]byte(`"[[fe80::8097:76eb:b397:e067%wlp2s0]]"`), nil, true},
+		{[]byte(`"[[fe80::8097:76eb:b397:e067%wlp2s0"`), nil, true},
 		{[]byte(`"play:"`), nil, true},
 		{[]byte(`"play::"`), nil, true},
 		{[]byte(`"play:90000"`), nil, true},
@@ -147,20 +155,23 @@ func TestHostUnmarshalJSON(t *testing.T) {
 		{[]byte(`":"`), nil, true},
 	}
 
-	for i, testCase := range testCases {
-		var host Host
-		err := host.UnmarshalJSON(testCase.data)
-		expectErr := (err != nil)
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run("", func(t *testing.T) {
+			var host Host
+			err := host.UnmarshalJSON(testCase.data)
+			expectErr := (err != nil)
 
-		if expectErr != testCase.expectErr {
-			t.Fatalf("test %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)
-		}
-
-		if !testCase.expectErr {
-			if !reflect.DeepEqual(&host, testCase.expectedHost) {
-				t.Fatalf("test %v: host: expected: %#v, got: %#v", i+1, testCase.expectedHost, host)
+			if expectErr != testCase.expectErr {
+				t.Errorf("error: expected: %v, got: %v", testCase.expectErr, expectErr)
 			}
-		}
+
+			if !testCase.expectErr {
+				if !reflect.DeepEqual(&host, testCase.expectedHost) {
+					t.Errorf("host: expected: %#v, got: %#v", testCase.expectedHost, host)
+				}
+			}
+		})
 	}
 }
 
@@ -173,15 +184,15 @@ func TestParseHost(t *testing.T) {
 		{"play", &Host{"play", 0, false}, false},
 		{"play:0", &Host{"play", 0, true}, false},
 		{"play:9000", &Host{"play", 9000, true}, false},
-		{"play.minio.io", &Host{"play.minio.io", 0, false}, false},
-		{"play.minio.io:9000", &Host{"play.minio.io", 9000, true}, false},
+		{"play.min.io", &Host{"play.min.io", 0, false}, false},
+		{"play.min.io:9000", &Host{"play.min.io", 9000, true}, false},
 		{"147.75.201.93", &Host{"147.75.201.93", 0, false}, false},
 		{"147.75.201.93:9000", &Host{"147.75.201.93", 9000, true}, false},
 		{"play12", &Host{"play12", 0, false}, false},
 		{"12play", &Host{"12play", 0, false}, false},
 		{"play-minio-io", &Host{"play-minio-io", 0, false}, false},
-		{"play--minio.io", &Host{"play--minio.io", 0, false}, false},
-		{":9000", nil, true},
+		{"play--min.io", &Host{"play--min.io", 0, false}, false},
+		{":9000", &Host{"", 9000, true}, false},
 		{"play:", nil, true},
 		{"play::", nil, true},
 		{"play:90000", nil, true},
@@ -192,8 +203,39 @@ func TestParseHost(t *testing.T) {
 		{"", nil, true},
 	}
 
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.Run("", func(t *testing.T) {
+			host, err := ParseHost(testCase.s)
+			expectErr := (err != nil)
+
+			if expectErr != testCase.expectErr {
+				t.Errorf("error: expected: %v, got: %v", testCase.expectErr, expectErr)
+			}
+
+			if !testCase.expectErr {
+				if !reflect.DeepEqual(host, testCase.expectedHost) {
+					t.Errorf("host: expected: %#v, got: %#v", testCase.expectedHost, host)
+				}
+			}
+		})
+	}
+}
+
+func TestTrimIPv6(t *testing.T) {
+	testCases := []struct {
+		IP         string
+		expectedIP string
+		expectErr  bool
+	}{
+		{"[fe80::8097:76eb:b397:e067%wlp2s0]", "fe80::8097:76eb:b397:e067%wlp2s0", false},
+		{"fe80::8097:76eb:b397:e067%wlp2s0]", "fe80::8097:76eb:b397:e067%wlp2s0", true},
+		{"[fe80::8097:76eb:b397:e067%wlp2s0]]", "fe80::8097:76eb:b397:e067%wlp2s0]", false},
+		{"[[fe80::8097:76eb:b397:e067%wlp2s0]]", "[fe80::8097:76eb:b397:e067%wlp2s0]", false},
+	}
+
 	for i, testCase := range testCases {
-		host, err := ParseHost(testCase.s)
+		ip, err := trimIPv6(testCase.IP)
 		expectErr := (err != nil)
 
 		if expectErr != testCase.expectErr {
@@ -201,8 +243,8 @@ func TestParseHost(t *testing.T) {
 		}
 
 		if !testCase.expectErr {
-			if !reflect.DeepEqual(host, testCase.expectedHost) {
-				t.Fatalf("test %v: host: expected: %#v, got: %#v", i+1, testCase.expectedHost, host)
+			if ip != testCase.expectedIP {
+				t.Fatalf("test %v: IP: expected: %#v, got: %#v", i+1, testCase.expectedIP, ip)
 			}
 		}
 	}

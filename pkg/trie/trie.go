@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2014, 2015, 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // Package trie implements a simple trie tree for minio server/tools borrows
 // idea from - https://godoc.org/golang.org/x/text/internal/triegen.
@@ -21,7 +22,7 @@ package trie
 // Node trie tree node container carries value and children.
 type Node struct {
 	exists bool
-	value  interface{}
+	value  string
 	child  map[rune]*Node // runes as child.
 }
 
@@ -29,7 +30,7 @@ type Node struct {
 func newNode() *Node {
 	return &Node{
 		exists: false,
-		value:  nil,
+		value:  "",
 		child:  make(map[rune]*Node),
 	}
 }
@@ -65,16 +66,16 @@ func (t *Trie) Insert(key string) {
 }
 
 // PrefixMatch - prefix match.
-func (t *Trie) PrefixMatch(key string) []interface{} {
+func (t *Trie) PrefixMatch(key string) []string {
 	node, _ := t.findNode(key)
-	if node != nil {
-		return t.Walk(node)
+	if node == nil {
+		return nil
 	}
-	return []interface{}{}
+	return t.Walk(node)
 }
 
 // Walk the tree.
-func (t *Trie) Walk(node *Node) (ret []interface{}) {
+func (t *Trie) Walk(node *Node) (ret []string) {
 	if node.exists {
 		ret = append(ret, node.value)
 	}

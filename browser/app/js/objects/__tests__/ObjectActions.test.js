@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -64,6 +64,63 @@ describe("ObjectActions", () => {
       .simulate("click", { preventDefault: jest.fn() })
     wrapper.find("DeleteObjectConfirmModal").prop("deleteObject")()
     expect(deleteObject).toHaveBeenCalledWith("obj1")
+  })
+
+
+  it("should call downloadObject when single object is selected and download button is clicked", () => {
+    const downloadObject = jest.fn()
+    const wrapper = shallow(
+      <ObjectActions
+        object={{ name: "obj1" }}
+        currentPrefix={"pre1/"}
+        downloadObject={downloadObject} />
+    )
+    wrapper
+      .find("a")
+      .at(1)
+      .simulate("click", { preventDefault: jest.fn() })
+    expect(downloadObject).toHaveBeenCalled()
+  })
+
+
+  it("should show PreviewObjectModal when preview action is clicked", () => {
+    const wrapper = shallow(
+      <ObjectActions 
+      object={{ name: "obj1", contentType: "image/jpeg"}} 
+      currentPrefix={"pre1/"} />
+    )
+    wrapper
+      .find("a")
+      .at(1)
+      .simulate("click", { preventDefault: jest.fn() })
+    expect(wrapper.state("showPreview")).toBeTruthy()
+    expect(wrapper.find("PreviewObjectModal").length).toBe(1)
+  })
+
+  it("should hide PreviewObjectModal when cancel button is clicked", () => {
+    const wrapper = shallow(
+      <ObjectActions 
+        object={{ name: "obj1" , contentType: "image/jpeg"}}
+        currentPrefix={"pre1/"} />
+    )
+    wrapper
+      .find("a")
+      .at(1)
+      .simulate("click", { preventDefault: jest.fn() })
+    wrapper.find("PreviewObjectModal").prop("hidePreviewModal")()
+    wrapper.update()
+    expect(wrapper.state("showPreview")).toBeFalsy()
+    expect(wrapper.find("PreviewObjectModal").length).toBe(0)
+  })
+  it("should not show PreviewObjectModal when preview action is clicked if object is not an image", () => {
+    const wrapper = shallow(
+      <ObjectActions 
+      object={{ name: "obj1"}} 
+      currentPrefix={"pre1/"} />
+    )
+    expect(wrapper
+      .find("a")
+      .length).toBe(3) // find only the other 2
   })
 
   it("should call shareObject with object and expiry", () => {

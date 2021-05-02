@@ -1,27 +1,26 @@
-/*
- * Minio Cloud Storage, (C) 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"fmt"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -30,7 +29,7 @@ import (
 	"github.com/minio/minio/pkg/hash"
 )
 
-// Wrapper for calling NewMultipartUpload tests for both XL multiple disks and single node setup.
+// Wrapper for calling NewMultipartUpload tests for both Erasure multiple disks and single node setup.
 func TestObjectNewMultipartUpload(t *testing.T) {
 	ExecObjectLayerTest(t, testObjectNewMultipartUpload)
 }
@@ -57,23 +56,18 @@ func testObjectNewMultipartUpload(obj ObjectLayer, instanceType string, t TestEr
 	}
 
 	// Create bucket before intiating NewMultipartUpload.
-	err = obj.MakeBucketWithLocation(context.Background(), bucket, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucket, BucketOptions{})
 	if err != nil {
 		// failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
 	}
 
-	_, err = obj.NewMultipartUpload(context.Background(), bucket, "\\", opts)
-	if err == nil {
-		t.Fatalf("%s: Expected to fail since object name is invalid.", instanceType)
-	}
-
-	uploadID, err := obj.NewMultipartUpload(context.Background(), bucket, object, opts)
+	uploadID, err := obj.NewMultipartUpload(context.Background(), bucket, "\\", opts)
 	if err != nil {
 		t.Fatalf("%s : %s", instanceType, err.Error())
 	}
 
-	err = obj.AbortMultipartUpload(context.Background(), bucket, object, uploadID)
+	err = obj.AbortMultipartUpload(context.Background(), bucket, "\\", uploadID, opts)
 	if err != nil {
 		switch err.(type) {
 		case InvalidUploadID:
@@ -84,7 +78,7 @@ func testObjectNewMultipartUpload(obj ObjectLayer, instanceType string, t TestEr
 	}
 }
 
-// Wrapper for calling AbortMultipartUpload tests for both XL multiple disks and single node setup.
+// Wrapper for calling AbortMultipartUpload tests for both Erasure multiple disks and single node setup.
 func TestObjectAbortMultipartUpload(t *testing.T) {
 	ExecObjectLayerTest(t, testObjectAbortMultipartUpload)
 }
@@ -96,7 +90,7 @@ func testObjectAbortMultipartUpload(obj ObjectLayer, instanceType string, t Test
 	object := "minio-object"
 	opts := ObjectOptions{}
 	// Create bucket before intiating NewMultipartUpload.
-	err := obj.MakeBucketWithLocation(context.Background(), bucket, "")
+	err := obj.MakeBucketWithLocation(context.Background(), bucket, BucketOptions{})
 	if err != nil {
 		// failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -114,14 +108,14 @@ func testObjectAbortMultipartUpload(obj ObjectLayer, instanceType string, t Test
 		expectedErrType error
 	}{
 		{"--", object, uploadID, BucketNotFound{}},
-		{bucket, "\\", uploadID, ObjectNameInvalid{}},
 		{"foo", object, uploadID, BucketNotFound{}},
 		{bucket, object, "foo-foo", InvalidUploadID{}},
+		{bucket, "\\", uploadID, InvalidUploadID{}},
 		{bucket, object, uploadID, nil},
 	}
 	// Iterating over creatPartCases to generate multipart chunks.
 	for i, testCase := range abortTestCases {
-		err = obj.AbortMultipartUpload(context.Background(), testCase.bucketName, testCase.objName, testCase.uploadID)
+		err = obj.AbortMultipartUpload(context.Background(), testCase.bucketName, testCase.objName, testCase.uploadID, opts)
 		if testCase.expectedErrType == nil && err != nil {
 			t.Errorf("Test %d, unexpected err is received: %v, expected:%v\n", i+1, err, testCase.expectedErrType)
 		}
@@ -131,7 +125,7 @@ func testObjectAbortMultipartUpload(obj ObjectLayer, instanceType string, t Test
 	}
 }
 
-// Wrapper for calling isUploadIDExists tests for both XL multiple disks and single node setup.
+// Wrapper for calling isUploadIDExists tests for both Erasure multiple disks and single node setup.
 func TestObjectAPIIsUploadIDExists(t *testing.T) {
 	ExecObjectLayerTest(t, testObjectAPIIsUploadIDExists)
 }
@@ -142,7 +136,7 @@ func testObjectAPIIsUploadIDExists(obj ObjectLayer, instanceType string, t TestE
 	object := "minio-object"
 
 	// Create bucket before intiating NewMultipartUpload.
-	err := obj.MakeBucketWithLocation(context.Background(), bucket, "")
+	err := obj.MakeBucketWithLocation(context.Background(), bucket, BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -153,7 +147,8 @@ func testObjectAPIIsUploadIDExists(obj ObjectLayer, instanceType string, t TestE
 		t.Fatalf("%s : %s", instanceType, err.Error())
 	}
 
-	err = obj.AbortMultipartUpload(context.Background(), bucket, object, "abc")
+	opts := ObjectOptions{}
+	err = obj.AbortMultipartUpload(context.Background(), bucket, object, "abc", opts)
 	switch err.(type) {
 	case InvalidUploadID:
 	default:
@@ -161,94 +156,9 @@ func testObjectAPIIsUploadIDExists(obj ObjectLayer, instanceType string, t TestE
 	}
 }
 
-// Wrapper for calling TestPutObjectPartDiskNotFound tests for both XL
-// write quorum.
-func TestPutObjectPartDiskNotFound(t *testing.T) {
-	ExecObjectLayerDiskAlteredTest(t, testPutObjectPartDiskNotFound)
-}
-
-// testPutObjectPartDiskNotFound - Tests validate PutObjectPart behavior when disks go offline.
-func testPutObjectPartDiskNotFound(obj ObjectLayer, instanceType string, disks []string, t *testing.T) {
-	bucketNames := []string{"minio-bucket", "minio-2-bucket"}
-	objectNames := []string{"minio-object-1.txt"}
-	uploadIDs := []string{}
-
-	// bucketnames[0].
-	// objectNames[0].
-	// uploadIds [0].
-	// Create bucket before intiating NewMultipartUpload.
-	err := obj.MakeBucketWithLocation(context.Background(), bucketNames[0], "")
-	if err != nil {
-		// Failed to create newbucket, abort.
-		t.Fatalf("%s : %s", instanceType, err.Error())
-	}
-
-	// Initiate Multipart Upload on the above created bucket.
-	uploadID, err := obj.NewMultipartUpload(context.Background(), bucketNames[0], objectNames[0], ObjectOptions{})
-	if err != nil {
-		// Failed to create NewMultipartUpload, abort.
-		t.Fatalf("%s : %s", instanceType, err.Error())
-	}
-
-	// Remove some random disk.
-	for _, disk := range disks[:6] {
-		os.RemoveAll(disk)
-	}
-
-	uploadIDs = append(uploadIDs, uploadID)
-
-	// Create multipart parts.
-	// Need parts to be uploaded before MultipartLists can be called and tested.
-	createPartCases := []struct {
-		bucketName      string
-		objName         string
-		uploadID        string
-		PartID          int
-		inputReaderData string
-		inputMd5        string
-		intputDataSize  int64
-		expectedMd5     string
-	}{
-		// Case 1-5.
-		// Creating sequence of parts for same uploadID.
-		// Used to ensure that the ListMultipartResult produces one output for the four parts uploaded below for the given upload ID.
-		{bucketNames[0], objectNames[0], uploadIDs[0], 1, "abcd", "e2fc714c4727ee9395f324cd2e7f331f", int64(len("abcd")), "e2fc714c4727ee9395f324cd2e7f331f"},
-		{bucketNames[0], objectNames[0], uploadIDs[0], 2, "efgh", "1f7690ebdd9b4caf8fab49ca1757bf27", int64(len("efgh")), "1f7690ebdd9b4caf8fab49ca1757bf27"},
-		{bucketNames[0], objectNames[0], uploadIDs[0], 3, "ijkl", "09a0877d04abf8759f99adec02baf579", int64(len("ijkl")), "09a0877d04abf8759f99adec02baf579"},
-		{bucketNames[0], objectNames[0], uploadIDs[0], 4, "mnop", "e132e96a5ddad6da8b07bba6f6131fef", int64(len("mnop")), "e132e96a5ddad6da8b07bba6f6131fef"},
-		{bucketNames[0], objectNames[0], uploadIDs[0], 5, "mnop", "e132e96a5ddad6da8b07bba6f6131fef", int64(len("mnop")), "e132e96a5ddad6da8b07bba6f6131fef"},
-	}
-	sha256sum := ""
-	// Iterating over creatPartCases to generate multipart chunks.
-	for _, testCase := range createPartCases {
-		_, err = obj.PutObjectPart(context.Background(), testCase.bucketName, testCase.objName, testCase.uploadID, testCase.PartID, mustGetPutObjReader(t, bytes.NewBufferString(testCase.inputReaderData), testCase.intputDataSize, testCase.inputMd5, sha256sum), ObjectOptions{})
-		if err != nil {
-			t.Fatalf("%s : %s", instanceType, err.Error())
-		}
-	}
-
-	// This causes quorum failure verify.
-	disks = disks[len(disks)-3:]
-	for _, disk := range disks {
-		os.RemoveAll(disk)
-	}
-
-	// Object part upload should fail with quorum not available.
-	testCase := createPartCases[len(createPartCases)-1]
-	_, err = obj.PutObjectPart(context.Background(), testCase.bucketName, testCase.objName, testCase.uploadID, testCase.PartID, mustGetPutObjReader(t, bytes.NewBufferString(testCase.inputReaderData), testCase.intputDataSize, testCase.inputMd5, sha256sum), ObjectOptions{})
-	if err == nil {
-		t.Fatalf("Test %s: expected to fail but passed instead", instanceType)
-	}
-	// as majority of xl.json are not available, we expect uploadID to be not available.
-	expectedErr := InvalidUploadID{UploadID: testCase.uploadID}
-	if err.Error() != expectedErr.Error() {
-		t.Fatalf("Test %s: expected error %s, got %s instead.", instanceType, expectedErr, err)
-	}
-}
-
-// Wrapper for calling PutObjectPart tests for both XL multiple disks and single node setup.
+// Wrapper for calling PutObjectPart tests for both Erasure multiple disks and single node setup.
 func TestObjectAPIPutObjectPart(t *testing.T) {
-	ExecObjectLayerTest(t, testObjectAPIPutObjectPart)
+	ExecExtendedObjectLayerTest(t, testObjectAPIPutObjectPart)
 }
 
 // Tests validate correctness of PutObjectPart.
@@ -258,7 +168,7 @@ func testObjectAPIPutObjectPart(obj ObjectLayer, instanceType string, t TestErrH
 	object := "minio-object"
 	opts := ObjectOptions{}
 	// Create bucket before intiating NewMultipartUpload.
-	err := obj.MakeBucketWithLocation(context.Background(), bucket, "")
+	err := obj.MakeBucketWithLocation(context.Background(), bucket, BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -270,7 +180,7 @@ func testObjectAPIPutObjectPart(obj ObjectLayer, instanceType string, t TestErrH
 		t.Fatalf("%s : %s", instanceType, err.Error())
 	}
 	// Creating a dummy bucket for tests.
-	err = obj.MakeBucketWithLocation(context.Background(), "unused-bucket", "")
+	err = obj.MakeBucketWithLocation(context.Background(), "unused-bucket", BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -302,7 +212,7 @@ func testObjectAPIPutObjectPart(obj ObjectLayer, instanceType string, t TestErrH
 		{"a", "obj", "", 1, "", "", "", 0, false, "", fmt.Errorf("%s", "Bucket not found: a")},
 		// Test case - 5.
 		// Case with invalid object names.
-		{bucket, "", "", 1, "", "", "", 0, false, "", fmt.Errorf("%s", "Object name invalid: minio-bucket#")},
+		{bucket, "", "", 1, "", "", "", 0, false, "", fmt.Errorf("%s", "Object name invalid: minio-bucket/")},
 		// Test case - 6.
 		// Valid object and bucket names but non-existent bucket.
 		{"abc", "def", "", 1, "", "", "", 0, false, "", fmt.Errorf("%s", "Bucket not found: abc")},
@@ -378,9 +288,9 @@ func testObjectAPIPutObjectPart(obj ObjectLayer, instanceType string, t TestErrH
 	}
 }
 
-// Wrapper for calling TestListMultipartUploads tests for both XL multiple disks and single node setup.
+// Wrapper for calling TestListMultipartUploads tests for both Erasure multiple disks and single node setup.
 func TestListMultipartUploads(t *testing.T) {
-	ExecObjectLayerTest(t, testListMultipartUploads)
+	ExecExtendedObjectLayerTest(t, testListMultipartUploads)
 }
 
 // testListMultipartUploads - Tests validate listing of multipart uploads.
@@ -394,7 +304,7 @@ func testListMultipartUploads(obj ObjectLayer, instanceType string, t TestErrHan
 	// objectNames[0].
 	// uploadIds [0].
 	// Create bucket before initiating NewMultipartUpload.
-	err := obj.MakeBucketWithLocation(context.Background(), bucketNames[0], "")
+	err := obj.MakeBucketWithLocation(context.Background(), bucketNames[0], BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -412,7 +322,7 @@ func testListMultipartUploads(obj ObjectLayer, instanceType string, t TestErrHan
 	// objectNames[0].
 	// uploadIds [1-3].
 	// Bucket to test for mutiple upload Id's for a given object.
-	err = obj.MakeBucketWithLocation(context.Background(), bucketNames[1], "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketNames[1], BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -433,7 +343,7 @@ func testListMultipartUploads(obj ObjectLayer, instanceType string, t TestErrHan
 	// bucketnames[2].
 	// objectNames[0-2].
 	// uploadIds [4-9].
-	err = obj.MakeBucketWithLocation(context.Background(), bucketNames[2], "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketNames[2], BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -665,7 +575,7 @@ func testListMultipartUploads(obj ObjectLayer, instanceType string, t TestErrHan
 		// Expecting the result to contain one MultipartInfo entry and IsTruncated to be false.
 		{
 			MaxUploads:  2,
-			Delimiter:   "/",
+			Delimiter:   SlashSeparator,
 			Prefix:      "",
 			IsTruncated: false,
 			Uploads: []MultipartInfo{
@@ -1113,10 +1023,9 @@ func testListMultipartUploads(obj ObjectLayer, instanceType string, t TestErrHan
 		{"volatile-bucket-1", "", "", "", "", 0, ListMultipartsInfo{}, BucketNotFound{Bucket: "volatile-bucket-1"}, false},
 		{"volatile-bucket-2", "", "", "", "", 0, ListMultipartsInfo{}, BucketNotFound{Bucket: "volatile-bucket-2"}, false},
 		{"volatile-bucket-3", "", "", "", "", 0, ListMultipartsInfo{}, BucketNotFound{Bucket: "volatile-bucket-3"}, false},
-		// Valid, existing bucket, but sending invalid delimeter values (Test number 8-9).
-		// Empty string < "" > and forward slash < / > are the ony two valid arguments for delimeter.
-		{bucketNames[0], "", "", "", "*", 0, ListMultipartsInfo{}, fmt.Errorf("delimiter '%s' is not supported", "*"), false},
-		{bucketNames[0], "", "", "", "-", 0, ListMultipartsInfo{}, fmt.Errorf("delimiter '%s' is not supported", "-"), false},
+		// Valid, existing bucket, delimiter not supported, returns empty values (Test number 8-9).
+		{bucketNames[0], "", "", "", "*", 0, ListMultipartsInfo{Delimiter: "*"}, nil, true},
+		{bucketNames[0], "", "", "", "-", 0, ListMultipartsInfo{Delimiter: "-"}, nil, true},
 		// Testing for failure cases with both perfix and marker (Test number 10).
 		// The prefix and marker combination to be valid it should satisfy strings.HasPrefix(marker, prefix).
 		{bucketNames[0], "asia", "europe-object", "", "", 0, ListMultipartsInfo{},
@@ -1125,7 +1034,7 @@ func testListMultipartUploads(obj ObjectLayer, instanceType string, t TestErrHan
 		{bucketNames[0], "asia", "asia/europe/", "abc", "", 0, ListMultipartsInfo{},
 			fmt.Errorf("Invalid combination of uploadID marker '%s' and marker '%s'", "abc", "asia/europe/"), false},
 		{bucketNames[0], "asia", "asia/europe", "abc", "", 0, ListMultipartsInfo{},
-			fmt.Errorf("unknown UUID string %s", "abc"), false},
+			fmt.Errorf("Malformed upload id %s", "abc"), false},
 
 		// Setting up valid case of ListMultiPartUploads.
 		// Test case with multiple parts for a single uploadID (Test number 13).
@@ -1155,7 +1064,7 @@ func testListMultipartUploads(obj ObjectLayer, instanceType string, t TestErrHan
 		{bucketNames[0], "orange", "", "", "", 2, listMultipartResults[12], nil, true},
 		{bucketNames[0], "Asia", "", "", "", 2, listMultipartResults[13], nil, true},
 		// setting delimiter (Test number 27).
-		{bucketNames[0], "", "", "", "/", 2, listMultipartResults[14], nil, true},
+		{bucketNames[0], "", "", "", SlashSeparator, 2, listMultipartResults[14], nil, true},
 		//Test case with multiple uploadID listing for given object (Test number 28).
 		{bucketNames[1], "", "", "", "", 100, listMultipartResults[15], nil, true},
 		// Test case with multiple uploadID listing for given object, but uploadID marker set.
@@ -1178,9 +1087,6 @@ func testListMultipartUploads(obj ObjectLayer, instanceType string, t TestErrHan
 		{bucketNames[1], "Asia", "", "", "", 10, listMultipartResults[23], nil, true},
 		// Test case with `Prefix` and `UploadIDMarker` (Test number 37).
 		{bucketNames[1], "min", "minio-object-1.txt", uploadIDs[1], "", 10, listMultipartResults[24], nil, true},
-		// Test case with `KeyMarker`  and `UploadIDMarker` (Test number 38).
-		// {bucketNames[1], "", "minio-object-1.txt", uploadIDs[1], "", 10, listMultipartResults[24], nil, true},
-
 		// Test case for bucket with multiple objects in it.
 		//	Bucket used : `bucketNames[2]`.
 		//	Objects used: `objectNames[1-5]`.
@@ -1202,16 +1108,10 @@ func testListMultipartUploads(obj ObjectLayer, instanceType string, t TestErrHan
 		// Since all available entries are listed, IsTruncated is expected to be false
 		// and NextMarkers are expected to empty.
 		{bucketNames[2], "", "", "", "", 6, listMultipartResults[31], nil, true},
-		//	Test case with `uploadIDMarker` (Test number 46).
-		// {bucketNames[2], "", "", uploadIDs[6], "", 10, listMultipartResults[32], nil, true},
 		//	Test case with `KeyMarker` (Test number 47).
 		{bucketNames[2], "", objectNames[3], "", "", 10, listMultipartResults[33], nil, true},
 		//	Test case with `prefix` and `KeyMarker` (Test number 48).
 		{bucketNames[2], "minio-object", objectNames[1], "", "", 10, listMultipartResults[34], nil, true},
-		//	Test case with `prefix` and `uploadIDMarker` (Test number 49).
-		// {bucketNames[2], globalMinioDefaultOwnerID, "", uploadIDs[4], "", 10, listMultipartResults[35], nil, true},
-		//	Test case with `KeyMarker` and `uploadIDMarker` (Test number 50).
-		// {bucketNames[2], "minio-object.txt", "", uploadIDs[5], "", 10, listMultipartResults[36], nil, true},
 	}
 
 	for i, testCase := range testCases {
@@ -1252,7 +1152,7 @@ func testListMultipartUploads(obj ObjectLayer, instanceType string, t TestErrHan
 	}
 }
 
-// Wrapper for calling TestListObjectPartsDiskNotFound tests for both XL multiple disks and single node setup.
+// Wrapper for calling TestListObjectPartsDiskNotFound tests for both Erasure multiple disks and single node setup.
 func TestListObjectPartsDiskNotFound(t *testing.T) {
 	ExecObjectLayerDiskAlteredTest(t, testListObjectPartsDiskNotFound)
 }
@@ -1268,7 +1168,7 @@ func testListObjectPartsDiskNotFound(obj ObjectLayer, instanceType string, disks
 	// objectNames[0].
 	// uploadIds [0].
 	// Create bucket before intiating NewMultipartUpload.
-	err := obj.MakeBucketWithLocation(context.Background(), bucketNames[0], "")
+	err := obj.MakeBucketWithLocation(context.Background(), bucketNames[0], BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -1497,7 +1397,7 @@ func testListObjectPartsDiskNotFound(obj ObjectLayer, instanceType string, disks
 	}
 }
 
-// Wrapper for calling TestListObjectParts tests for both XL multiple disks and single node setup.
+// Wrapper for calling TestListObjectParts tests for both Erasure multiple disks and single node setup.
 func TestListObjectParts(t *testing.T) {
 	ExecObjectLayerTest(t, testListObjectParts)
 }
@@ -1513,7 +1413,7 @@ func testListObjectParts(obj ObjectLayer, instanceType string, t TestErrHandler)
 	// objectNames[0].
 	// uploadIds [0].
 	// Create bucket before intiating NewMultipartUpload.
-	err := obj.MakeBucketWithLocation(context.Background(), bucketNames[0], "")
+	err := obj.MakeBucketWithLocation(context.Background(), bucketNames[0], BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -1667,7 +1567,7 @@ func testListObjectParts(obj ObjectLayer, instanceType string, t TestErrHandler)
 	}
 
 	for i, testCase := range testCases {
-		actualResult, actualErr := obj.ListObjectParts(context.Background(), testCase.bucket, testCase.object, testCase.uploadID, testCase.partNumberMarker, testCase.maxParts, ObjectOptions{})
+		actualResult, actualErr := obj.ListObjectParts(context.Background(), testCase.bucket, testCase.object, testCase.uploadID, testCase.partNumberMarker, testCase.maxParts, opts)
 		if actualErr != nil && testCase.shouldPass {
 			t.Errorf("Test %d: %s: Expected to pass, but failed with: <ERROR> %s", i+1, instanceType, actualErr.Error())
 		}
@@ -1744,7 +1644,7 @@ func testListObjectParts(obj ObjectLayer, instanceType string, t TestErrHandler)
 
 // Test for validating complete Multipart upload.
 func TestObjectCompleteMultipartUpload(t *testing.T) {
-	ExecObjectLayerTest(t, testObjectCompleteMultipartUpload)
+	ExecExtendedObjectLayerTest(t, testObjectCompleteMultipartUpload)
 }
 
 // Tests validate CompleteMultipart functionality.
@@ -1759,7 +1659,7 @@ func testObjectCompleteMultipartUpload(obj ObjectLayer, instanceType string, t T
 	// objectNames[0].
 	// uploadIds [0].
 	// Create bucket before intiating NewMultipartUpload.
-	err = obj.MakeBucketWithLocation(context.Background(), bucketNames[0], "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketNames[0], BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err)
@@ -1796,6 +1696,7 @@ func testObjectCompleteMultipartUpload(obj ObjectLayer, instanceType string, t T
 		// Part with size larger than 5Mb.
 		{bucketNames[0], objectNames[0], uploadIDs[0], 5, string(validPart), validPartMD5, int64(len(string(validPart)))},
 		{bucketNames[0], objectNames[0], uploadIDs[0], 6, string(validPart), validPartMD5, int64(len(string(validPart)))},
+		{bucketNames[0], objectNames[0], uploadIDs[0], 7, string(validPart), validPartMD5, int64(len(string(validPart)))},
 	}
 	sha256sum := ""
 	var opts ObjectOptions
@@ -1837,7 +1738,7 @@ func testObjectCompleteMultipartUpload(obj ObjectLayer, instanceType string, t T
 		// Part size greater than 5MB.
 		{
 			[]CompletePart{
-				{ETag: validPartMD5, PartNumber: 5},
+				{ETag: fmt.Sprintf("\"\"\"\"\"%s\"\"\"", validPartMD5), PartNumber: 5},
 			},
 		},
 		// inputParts - 4.
@@ -1849,10 +1750,7 @@ func testObjectCompleteMultipartUpload(obj ObjectLayer, instanceType string, t T
 			},
 		},
 	}
-	s3MD5, err := getCompleteMultipartMD5(context.Background(), inputParts[3].parts)
-	if err != nil {
-		t.Fatalf("Obtaining S3MD5 failed")
-	}
+	s3MD5 := getCompleteMultipartMD5(inputParts[3].parts)
 
 	// Test cases with sample input values for CompleteMultipartUpload.
 	testCases := []struct {
@@ -1881,8 +1779,8 @@ func testObjectCompleteMultipartUpload(obj ObjectLayer, instanceType string, t T
 		// Asserting for Invalid UploadID (Test number 9).
 		{bucketNames[0], objectNames[0], "abc", []CompletePart{}, "", InvalidUploadID{UploadID: "abc"}, false},
 		// Test case with invalid Part Etag (Test number 10-11).
-		{bucketNames[0], objectNames[0], uploadIDs[0], []CompletePart{{ETag: "abc"}}, "", hex.ErrLength, false},
-		{bucketNames[0], objectNames[0], uploadIDs[0], []CompletePart{{ETag: "abcz"}}, "", hex.InvalidByteError(00), false},
+		{bucketNames[0], objectNames[0], uploadIDs[0], []CompletePart{{ETag: "abc"}}, "", InvalidPart{}, false},
+		{bucketNames[0], objectNames[0], uploadIDs[0], []CompletePart{{ETag: "abcz"}}, "", InvalidPart{}, false},
 		// Part number 0 doesn't exist, expecting InvalidPart error (Test number 12).
 		{bucketNames[0], objectNames[0], uploadIDs[0], []CompletePart{{ETag: "abcd", PartNumber: 0}}, "", InvalidPart{}, false},
 		// // Upload and PartNumber exists, But a deliberate ETag mismatch is introduced (Test number 13).
@@ -1900,46 +1798,49 @@ func testObjectCompleteMultipartUpload(obj ObjectLayer, instanceType string, t T
 		// the case above successfully completes CompleteMultipartUpload, the remaining Parts will be flushed.
 		// Expecting to fail with Invalid UploadID.
 		{bucketNames[0], objectNames[0], uploadIDs[0], inputParts[4].parts, "", InvalidUploadID{UploadID: uploadIDs[0]}, false},
-		// Expecting to fail due to bad
 	}
 
-	for i, testCase := range testCases {
-		actualResult, actualErr := obj.CompleteMultipartUpload(context.Background(), testCase.bucket, testCase.object, testCase.uploadID, testCase.parts, ObjectOptions{})
-		if actualErr != nil && testCase.shouldPass {
-			t.Errorf("Test %d: %s: Expected to pass, but failed with: <ERROR> %s", i+1, instanceType, actualErr)
-		}
-		if actualErr == nil && !testCase.shouldPass {
-			t.Errorf("Test %d: %s: Expected to fail with <ERROR> \"%s\", but passed instead", i+1, instanceType, testCase.expectedErr)
-		}
-		// Failed as expected, but does it fail for the expected reason.
-		if actualErr != nil && !testCase.shouldPass {
-			if reflect.TypeOf(actualErr) != reflect.TypeOf(testCase.expectedErr) {
-				t.Errorf("Test %d: %s: Expected to fail with error \"%s\", but instead failed with error \"%s\"", i+1, instanceType, testCase.expectedErr, actualErr)
+	for _, testCase := range testCases {
+		testCase := testCase
+		t.(*testing.T).Run("", func(t *testing.T) {
+			opts = ObjectOptions{}
+			actualResult, actualErr := obj.CompleteMultipartUpload(context.Background(), testCase.bucket, testCase.object, testCase.uploadID, testCase.parts, ObjectOptions{})
+			if actualErr != nil && testCase.shouldPass {
+				t.Errorf("%s: Expected to pass, but failed with: <ERROR> %s", instanceType, actualErr)
 			}
-		}
-		// Passes as expected, but asserting the results.
-		if actualErr == nil && testCase.shouldPass {
+			if actualErr == nil && !testCase.shouldPass {
+				t.Errorf("%s: Expected to fail with <ERROR> \"%s\", but passed instead", instanceType, testCase.expectedErr)
+			}
+			// Failed as expected, but does it fail for the expected reason.
+			if actualErr != nil && !testCase.shouldPass {
+				if reflect.TypeOf(actualErr) != reflect.TypeOf(testCase.expectedErr) {
+					t.Errorf("%s: Expected to fail with error \"%s\", but instead failed with error \"%s\"", instanceType, testCase.expectedErr, actualErr)
+				}
+			}
+			// Passes as expected, but asserting the results.
+			if actualErr == nil && testCase.shouldPass {
 
-			// Asserting IsTruncated.
-			if actualResult.ETag != testCase.expectedS3MD5 {
-				t.Errorf("Test %d: %s: Expected the result to be \"%v\", but found it to \"%v\"", i+1, instanceType, testCase.expectedS3MD5, actualResult)
+				// Asserting IsTruncated.
+				if actualResult.ETag != testCase.expectedS3MD5 {
+					t.Errorf("%s: Expected the result to be \"%v\", but found it to \"%v\"", instanceType, testCase.expectedS3MD5, actualResult)
+				}
 			}
-		}
+		})
 	}
 }
 
 // Benchmarks for ObjectLayer.PutObjectPart().
 // The intent is to benchmark PutObjectPart for various sizes ranging from few bytes to 100MB.
-// Also each of these Benchmarks are run both XL and FS backends.
+// Also each of these Benchmarks are run both Erasure and FS backends.
 
 // BenchmarkPutObjectPart5MbFS - Benchmark FS.PutObjectPart() for object size of 5MB.
 func BenchmarkPutObjectPart5MbFS(b *testing.B) {
 	benchmarkPutObjectPart(b, "FS", 5*humanize.MiByte)
 }
 
-// BenchmarkPutObjectPart5MbXL - Benchmark XL.PutObjectPart() for object size of 5MB.
-func BenchmarkPutObjectPart5MbXL(b *testing.B) {
-	benchmarkPutObjectPart(b, "XL", 5*humanize.MiByte)
+// BenchmarkPutObjectPart5MbErasure - Benchmark Erasure.PutObjectPart() for object size of 5MB.
+func BenchmarkPutObjectPart5MbErasure(b *testing.B) {
+	benchmarkPutObjectPart(b, "Erasure", 5*humanize.MiByte)
 }
 
 // BenchmarkPutObjectPart10MbFS - Benchmark FS.PutObjectPart() for object size of 10MB.
@@ -1947,9 +1848,9 @@ func BenchmarkPutObjectPart10MbFS(b *testing.B) {
 	benchmarkPutObjectPart(b, "FS", 10*humanize.MiByte)
 }
 
-// BenchmarkPutObjectPart10MbXL - Benchmark XL.PutObjectPart() for object size of 10MB.
-func BenchmarkPutObjectPart10MbXL(b *testing.B) {
-	benchmarkPutObjectPart(b, "XL", 10*humanize.MiByte)
+// BenchmarkPutObjectPart10MbErasure - Benchmark Erasure.PutObjectPart() for object size of 10MB.
+func BenchmarkPutObjectPart10MbErasure(b *testing.B) {
+	benchmarkPutObjectPart(b, "Erasure", 10*humanize.MiByte)
 }
 
 // BenchmarkPutObjectPart25MbFS - Benchmark FS.PutObjectPart() for object size of 25MB.
@@ -1958,9 +1859,9 @@ func BenchmarkPutObjectPart25MbFS(b *testing.B) {
 
 }
 
-// BenchmarkPutObjectPart25MbXL - Benchmark XL.PutObjectPart() for object size of 25MB.
-func BenchmarkPutObjectPart25MbXL(b *testing.B) {
-	benchmarkPutObjectPart(b, "XL", 25*humanize.MiByte)
+// BenchmarkPutObjectPart25MbErasure - Benchmark Erasure.PutObjectPart() for object size of 25MB.
+func BenchmarkPutObjectPart25MbErasure(b *testing.B) {
+	benchmarkPutObjectPart(b, "Erasure", 25*humanize.MiByte)
 }
 
 // BenchmarkPutObjectPart50MbFS - Benchmark FS.PutObjectPart() for object size of 50MB.
@@ -1968,7 +1869,7 @@ func BenchmarkPutObjectPart50MbFS(b *testing.B) {
 	benchmarkPutObjectPart(b, "FS", 50*humanize.MiByte)
 }
 
-// BenchmarkPutObjectPart50MbXL - Benchmark XL.PutObjectPart() for object size of 50MB.
-func BenchmarkPutObjectPart50MbXL(b *testing.B) {
-	benchmarkPutObjectPart(b, "XL", 50*humanize.MiByte)
+// BenchmarkPutObjectPart50MbErasure - Benchmark Erasure.PutObjectPart() for object size of 50MB.
+func BenchmarkPutObjectPart50MbErasure(b *testing.B) {
+	benchmarkPutObjectPart(b, "Erasure", 50*humanize.MiByte)
 }

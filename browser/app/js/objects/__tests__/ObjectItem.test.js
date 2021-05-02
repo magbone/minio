@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,7 +30,10 @@ describe("ObjectItem", () => {
 
   it("shouldn't call onClick when the object isclicked", () => {
     const onClick = jest.fn()
-    const wrapper = shallow(<ObjectItem name={"test"} />)
+    const checkObject = jest.fn()
+    const wrapper = shallow(
+      <ObjectItem name={"test"} checkObject={checkObject} />
+    )
     wrapper.find("a").simulate("click", { preventDefault: jest.fn() })
     expect(onClick).not.toHaveBeenCalled()
   })
@@ -57,9 +60,15 @@ describe("ObjectItem", () => {
   })
 
   it("should call uncheckObject when the object/prefix is unchecked", () => {
+    const checkObject = jest.fn()
     const uncheckObject = jest.fn()
     const wrapper = shallow(
-      <ObjectItem name={"test"} checked={true} uncheckObject={uncheckObject} />
+      <ObjectItem
+        name={"test"}
+        checked={true}
+        checkObject={checkObject}
+        uncheckObject={uncheckObject}
+      />
     )
     wrapper.find("input[type='checkbox']").simulate("change")
     expect(uncheckObject).toHaveBeenCalledWith("test")

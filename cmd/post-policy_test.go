@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2016, 2017, 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -33,14 +34,13 @@ import (
 )
 
 const (
-	expirationDateFormat = "2006-01-02T15:04:05.999Z"
-	iso8601DateFormat    = "20060102T150405Z"
+	iso8601DateFormat = "20060102T150405Z"
 )
 
 func newPostPolicyBytesV4WithContentRange(credential, bucketName, objectKey string, expiration time.Time) []byte {
 	t := UTCNow()
 	// Add the expiration date.
-	expirationStr := fmt.Sprintf(`"expiration": "%s"`, expiration.Format(expirationDateFormat))
+	expirationStr := fmt.Sprintf(`"expiration": "%s"`, expiration.Format(iso8601TimeFormat))
 	// Add the bucket condition, only accept buckets equal to the one passed.
 	bucketConditionStr := fmt.Sprintf(`["eq", "$bucket", "%s"]`, bucketName)
 	// Add the key condition, only accept keys equal to the one passed.
@@ -53,10 +53,12 @@ func newPostPolicyBytesV4WithContentRange(credential, bucketName, objectKey stri
 	dateConditionStr := fmt.Sprintf(`["eq", "$x-amz-date", "%s"]`, t.Format(iso8601DateFormat))
 	// Add the credential string, only accept the credential passed.
 	credentialConditionStr := fmt.Sprintf(`["eq", "$x-amz-credential", "%s"]`, credential)
+	// Add the meta-uuid string, set to 1234
+	uuidConditionStr := fmt.Sprintf(`["eq", "$x-amz-meta-uuid", "%s"]`, "1234")
 
 	// Combine all conditions into one string.
-	conditionStr := fmt.Sprintf(`"conditions":[%s, %s, %s, %s, %s, %s]`, bucketConditionStr,
-		keyConditionStr, contentLengthCondStr, algorithmConditionStr, dateConditionStr, credentialConditionStr)
+	conditionStr := fmt.Sprintf(`"conditions":[%s, %s, %s, %s, %s, %s, %s]`, bucketConditionStr,
+		keyConditionStr, contentLengthCondStr, algorithmConditionStr, dateConditionStr, credentialConditionStr, uuidConditionStr)
 	retStr := "{"
 	retStr = retStr + expirationStr + ","
 	retStr = retStr + conditionStr
@@ -69,7 +71,7 @@ func newPostPolicyBytesV4WithContentRange(credential, bucketName, objectKey stri
 func newPostPolicyBytesV4(credential, bucketName, objectKey string, expiration time.Time) []byte {
 	t := UTCNow()
 	// Add the expiration date.
-	expirationStr := fmt.Sprintf(`"expiration": "%s"`, expiration.Format(expirationDateFormat))
+	expirationStr := fmt.Sprintf(`"expiration": "%s"`, expiration.Format(iso8601TimeFormat))
 	// Add the bucket condition, only accept buckets equal to the one passed.
 	bucketConditionStr := fmt.Sprintf(`["eq", "$bucket", "%s"]`, bucketName)
 	// Add the key condition, only accept keys equal to the one passed.
@@ -80,9 +82,11 @@ func newPostPolicyBytesV4(credential, bucketName, objectKey string, expiration t
 	dateConditionStr := fmt.Sprintf(`["eq", "$x-amz-date", "%s"]`, t.Format(iso8601DateFormat))
 	// Add the credential string, only accept the credential passed.
 	credentialConditionStr := fmt.Sprintf(`["eq", "$x-amz-credential", "%s"]`, credential)
+	// Add the meta-uuid string, set to 1234
+	uuidConditionStr := fmt.Sprintf(`["eq", "$x-amz-meta-uuid", "%s"]`, "1234")
 
 	// Combine all conditions into one string.
-	conditionStr := fmt.Sprintf(`"conditions":[%s, %s, %s, %s, %s]`, bucketConditionStr, keyConditionStr, algorithmConditionStr, dateConditionStr, credentialConditionStr)
+	conditionStr := fmt.Sprintf(`"conditions":[%s, %s, %s, %s, %s, %s]`, bucketConditionStr, keyConditionStr, algorithmConditionStr, dateConditionStr, credentialConditionStr, uuidConditionStr)
 	retStr := "{"
 	retStr = retStr + expirationStr + ","
 	retStr = retStr + conditionStr
@@ -94,7 +98,7 @@ func newPostPolicyBytesV4(credential, bucketName, objectKey string, expiration t
 // newPostPolicyBytesV2 - creates a bare bones postpolicy string with key and bucket matches.
 func newPostPolicyBytesV2(bucketName, objectKey string, expiration time.Time) []byte {
 	// Add the expiration date.
-	expirationStr := fmt.Sprintf(`"expiration": "%s"`, expiration.Format(expirationDateFormat))
+	expirationStr := fmt.Sprintf(`"expiration": "%s"`, expiration.Format(iso8601TimeFormat))
 	// Add the bucket condition, only accept buckets equal to the one passed.
 	bucketConditionStr := fmt.Sprintf(`["eq", "$bucket", "%s"]`, bucketName)
 	// Add the key condition, only accept keys equal to the one passed.
@@ -110,7 +114,7 @@ func newPostPolicyBytesV2(bucketName, objectKey string, expiration time.Time) []
 	return []byte(retStr)
 }
 
-// Wrapper for calling TestPostPolicyBucketHandler tests for both XL multiple disks and single node setup.
+// Wrapper for calling TestPostPolicyBucketHandler tests for both Erasure multiple disks and single node setup.
 func TestPostPolicyBucketHandler(t *testing.T) {
 	ExecObjectLayerTest(t, testPostPolicyBucketHandler)
 }
@@ -125,10 +129,10 @@ func testPostPolicyBucketHandler(obj ObjectLayer, instanceType string, t TestErr
 	bucketName := getRandomBucketName()
 
 	var opts ObjectOptions
-	// Register the API end points with XL/FS object layer.
+	// Register the API end points with Erasure/FS object layer.
 	apiRouter := initTestAPIEndPoints(obj, []string{"PostPolicy"})
 
-	credentials := globalServerConfig.GetCredential()
+	credentials := globalActiveCred
 
 	curTime := UTCNow()
 	curTimePlus5Min := curTime.Add(time.Minute * 5)
@@ -137,7 +141,7 @@ func testPostPolicyBucketHandler(obj ObjectLayer, instanceType string, t TestErr
 	// objectNames[0].
 	// uploadIds [0].
 	// Create bucket before initiating NewMultipartUpload.
-	err := obj.MakeBucketWithLocation(context.Background(), bucketName, "")
+	err := obj.MakeBucketWithLocation(context.Background(), bucketName, BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -193,7 +197,7 @@ func testPostPolicyBucketHandler(obj ObjectLayer, instanceType string, t TestErr
 		{
 			objectName:         "test",
 			data:               []byte("Hello, World"),
-			expectedRespStatus: http.StatusBadRequest,
+			expectedRespStatus: http.StatusForbidden,
 			accessKey:          "",
 			secretKey:          "",
 			malformedBody:      false,
@@ -260,8 +264,8 @@ func testPostPolicyBucketHandler(obj ObjectLayer, instanceType string, t TestErr
 			expectedRespStatus: http.StatusNoContent,
 			accessKey:          credentials.AccessKey,
 			secretKey:          credentials.SecretKey,
-			dates:              []interface{}{curTimePlus5Min.Format(expirationDateFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)},
-			policy:             `{"expiration": "%s","conditions":[["eq", "$bucket", "` + bucketName + `"], ["starts-with", "$key", "test/"], ["eq", "$x-amz-algorithm", "AWS4-HMAC-SHA256"], ["eq", "$x-amz-date", "%s"], ["eq", "$x-amz-credential", "` + credentials.AccessKey + `/%s/us-east-1/s3/aws4_request"]]}`,
+			dates:              []interface{}{curTimePlus5Min.Format(iso8601TimeFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)},
+			policy:             `{"expiration": "%s","conditions":[["eq", "$bucket", "` + bucketName + `"], ["starts-with", "$key", "test/"], ["eq", "$x-amz-algorithm", "AWS4-HMAC-SHA256"], ["eq", "$x-amz-date", "%s"], ["eq", "$x-amz-credential", "` + credentials.AccessKey + `/%s/us-east-1/s3/aws4_request"],["eq", "$x-amz-meta-uuid", "1234"]]}`,
 		},
 		// Corrupted Base 64 result
 		{
@@ -270,7 +274,7 @@ func testPostPolicyBucketHandler(obj ObjectLayer, instanceType string, t TestErr
 			expectedRespStatus: http.StatusBadRequest,
 			accessKey:          credentials.AccessKey,
 			secretKey:          credentials.SecretKey,
-			dates:              []interface{}{curTimePlus5Min.Format(expirationDateFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)},
+			dates:              []interface{}{curTimePlus5Min.Format(iso8601TimeFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)},
 			policy:             `{"expiration": "%s","conditions":[["eq", "$bucket", "` + bucketName + `"], ["starts-with", "$key", "test/"], ["eq", "$x-amz-algorithm", "AWS4-HMAC-SHA256"], ["eq", "$x-amz-date", "%s"], ["eq", "$x-amz-credential", "` + credentials.AccessKey + `/%s/us-east-1/s3/aws4_request"]]}`,
 			corruptedBase64:    true,
 		},
@@ -281,7 +285,7 @@ func testPostPolicyBucketHandler(obj ObjectLayer, instanceType string, t TestErr
 			expectedRespStatus: http.StatusBadRequest,
 			accessKey:          credentials.AccessKey,
 			secretKey:          credentials.SecretKey,
-			dates:              []interface{}{curTimePlus5Min.Format(expirationDateFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)},
+			dates:              []interface{}{curTimePlus5Min.Format(iso8601TimeFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)},
 			policy:             `{"expiration": "%s","conditions":[["eq", "$bucket", "` + bucketName + `"], ["starts-with", "$key", "test/"], ["eq", "$x-amz-algorithm", "AWS4-HMAC-SHA256"], ["eq", "$x-amz-date", "%s"], ["eq", "$x-amz-credential", "` + credentials.AccessKey + `/%s/us-east-1/s3/aws4_request"]]}`,
 			corruptedMultipart: true,
 		},
@@ -290,7 +294,7 @@ func testPostPolicyBucketHandler(obj ObjectLayer, instanceType string, t TestErr
 		{
 			objectName:         "test",
 			data:               []byte("Hello, World"),
-			expectedRespStatus: http.StatusBadRequest,
+			expectedRespStatus: http.StatusForbidden,
 			accessKey:          "",
 			secretKey:          "",
 			dates:              []interface{}{},
@@ -300,20 +304,20 @@ func testPostPolicyBucketHandler(obj ObjectLayer, instanceType string, t TestErr
 		{
 			objectName:         "test",
 			data:               []byte("Hello, World"),
-			expectedRespStatus: http.StatusBadRequest,
+			expectedRespStatus: http.StatusForbidden,
 			accessKey:          credentials.AccessKey,
 			secretKey:          credentials.SecretKey,
-			dates:              []interface{}{curTime.Add(-1 * time.Minute * 5).Format(expirationDateFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)},
+			dates:              []interface{}{curTime.Add(-1 * time.Minute * 5).Format(iso8601TimeFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)},
 			policy:             `{"expiration": "%s","conditions":[["eq", "$bucket", "` + bucketName + `"], ["starts-with", "$key", "test/"], ["eq", "$x-amz-algorithm", "AWS4-HMAC-SHA256"], ["eq", "$x-amz-date", "%s"], ["eq", "$x-amz-credential", "` + credentials.AccessKey + `/%s/us-east-1/s3/aws4_request"]]}`,
 		},
 		// Corrupted policy document
 		{
 			objectName:         "test",
 			data:               []byte("Hello, World"),
-			expectedRespStatus: http.StatusBadRequest,
+			expectedRespStatus: http.StatusForbidden,
 			accessKey:          credentials.AccessKey,
 			secretKey:          credentials.SecretKey,
-			dates:              []interface{}{curTimePlus5Min.Format(expirationDateFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)},
+			dates:              []interface{}{curTimePlus5Min.Format(iso8601TimeFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)},
 			policy:             `{"3/aws4_request"]]}`,
 		},
 	}
@@ -411,7 +415,7 @@ func testPostPolicyBucketHandler(obj ObjectLayer, instanceType string, t TestErr
 
 }
 
-// Wrapper for calling TestPostPolicyBucketHandlerRedirect tests for both XL multiple disks and single node setup.
+// Wrapper for calling TestPostPolicyBucketHandlerRedirect tests for both Erasure multiple disks and single node setup.
 func TestPostPolicyBucketHandlerRedirect(t *testing.T) {
 	ExecObjectLayerTest(t, testPostPolicyBucketHandlerRedirect)
 }
@@ -439,15 +443,15 @@ func testPostPolicyBucketHandlerRedirect(obj ObjectLayer, instanceType string, t
 		t.Fatal(err)
 	}
 
-	// Register the API end points with XL/FS object layer.
+	// Register the API end points with Erasure/FS object layer.
 	apiRouter := initTestAPIEndPoints(obj, []string{"PostPolicy"})
 
-	credentials := globalServerConfig.GetCredential()
+	credentials := globalActiveCred
 
 	curTime := UTCNow()
 	curTimePlus5Min := curTime.Add(time.Minute * 5)
 
-	err = obj.MakeBucketWithLocation(context.Background(), bucketName, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketName, BucketOptions{})
 	if err != nil {
 		// Failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err.Error())
@@ -456,8 +460,8 @@ func testPostPolicyBucketHandlerRedirect(obj ObjectLayer, instanceType string, t
 	// initialize HTTP NewRecorder, this records any mutations to response writer inside the handler.
 	rec := httptest.NewRecorder()
 
-	dates := []interface{}{curTimePlus5Min.Format(expirationDateFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)}
-	policy := `{"expiration": "%s","conditions":[["eq", "$bucket", "` + bucketName + `"], {"success_action_redirect":"` + redirectURL.String() + `"},["starts-with", "$key", "test/"], ["eq", "$x-amz-algorithm", "AWS4-HMAC-SHA256"], ["eq", "$x-amz-date", "%s"], ["eq", "$x-amz-credential", "` + credentials.AccessKey + `/%s/us-east-1/s3/aws4_request"]]}`
+	dates := []interface{}{curTimePlus5Min.Format(iso8601TimeFormat), curTime.Format(iso8601DateFormat), curTime.Format(yyyymmdd)}
+	policy := `{"expiration": "%s","conditions":[["eq", "$bucket", "` + bucketName + `"], {"success_action_redirect":"` + redirectURL.String() + `"},["starts-with", "$key", "test/"], ["eq", "$x-amz-meta-uuid", "1234"], ["eq", "$x-amz-algorithm", "AWS4-HMAC-SHA256"], ["eq", "$x-amz-date", "%s"], ["eq", "$x-amz-credential", "` + credentials.AccessKey + `/%s/us-east-1/s3/aws4_request"]]}`
 
 	// Generate the final policy document
 	policy = fmt.Sprintf(policy, dates...)
@@ -490,8 +494,8 @@ func testPostPolicyBucketHandlerRedirect(obj ObjectLayer, instanceType string, t
 	expectedLocation := redirectURL.String()
 
 	// Check the new location url
-	if rec.HeaderMap.Get("Location") != expectedLocation {
-		t.Errorf("Unexpected location, expected = %s, found = `%s`", rec.HeaderMap.Get("Location"), expectedLocation)
+	if rec.Header().Get("Location") != expectedLocation {
+		t.Errorf("Unexpected location, expected = %s, found = `%s`", rec.Header().Get("Location"), expectedLocation)
 	}
 
 }
@@ -499,7 +503,7 @@ func testPostPolicyBucketHandlerRedirect(obj ObjectLayer, instanceType string, t
 // postPresignSignatureV4 - presigned signature for PostPolicy requests.
 func postPresignSignatureV4(policyBase64 string, t time.Time, secretAccessKey, location string) string {
 	// Get signining key.
-	signingkey := getSigningKey(secretAccessKey, t, location)
+	signingkey := getSigningKey(secretAccessKey, t, location, "s3")
 	// Calculate signature.
 	signature := getSignature(signingkey, policyBase64)
 	return signature
@@ -545,7 +549,7 @@ func newPostRequestV2(endPoint, bucketName, objectName string, accessKey, secret
 	// Set the body equal to the created policy.
 	reader := bytes.NewReader(buf.Bytes())
 
-	req, err := http.NewRequest("POST", makeTestTargetURL(endPoint, bucketName, "", nil), reader)
+	req, err := http.NewRequest(http.MethodPost, makeTestTargetURL(endPoint, bucketName, "", nil), reader)
 	if err != nil {
 		return nil, err
 	}
@@ -623,7 +627,7 @@ func newPostRequestV4Generic(endPoint, bucketName, objectName string, objData []
 	// Set the body equal to the created policy.
 	reader := bytes.NewReader(buf.Bytes())
 
-	req, err := http.NewRequest("POST", makeTestTargetURL(endPoint, bucketName, "", nil), reader)
+	req, err := http.NewRequest(http.MethodPost, makeTestTargetURL(endPoint, bucketName, "", nil), reader)
 	if err != nil {
 		return nil, err
 	}

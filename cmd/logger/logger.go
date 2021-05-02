@@ -1,27 +1,30 @@
-/*
- * Minio Cloud Storage, (C) 2015, 2016, 2017, 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package logger
 
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"go/build"
 	"hash"
+	"net/http"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -29,7 +32,7 @@ import (
 	"time"
 
 	"github.com/minio/highwayhash"
-	"github.com/minio/minio-go/pkg/set"
+	"github.com/minio/minio-go/v7/pkg/set"
 	"github.com/minio/minio/cmd/logger/message/log"
 )
 
@@ -55,13 +58,10 @@ const (
 
 var trimStrings []string
 
+var globalDeploymentID string
+
 // TimeFormat - logging time format.
 const TimeFormat string = "15:04:05 MST 01/02/2006"
-
-// List of error strings to be ignored by LogIf
-const (
-	diskNotFoundError = "disk not found"
-)
 
 var matchingFuncNames = [...]string{
 	"http.HandlerFunc.ServeHTTP",
@@ -73,9 +73,7 @@ var matchingFuncNames = [...]string{
 	"cmd.(*webAPIHandlers).ListObjects",
 	"cmd.(*webAPIHandlers).RemoveObject",
 	"cmd.(*webAPIHandlers).Login",
-	"cmd.(*webAPIHandlers).GenerateAuth",
 	"cmd.(*webAPIHandlers).SetAuth",
-	"cmd.(*webAPIHandlers).GetAuth",
 	"cmd.(*webAPIHandlers).CreateURLToken",
 	"cmd.(*webAPIHandlers).Upload",
 	"cmd.(*webAPIHandlers).Download",
@@ -137,9 +135,9 @@ func IsQuiet() bool {
 	return quietFlag
 }
 
-// RegisterUIError registers the specified rendering function. This latter
+// RegisterError registers the specified rendering function. This latter
 // will be called for a pretty rendering of fatal errors.
-func RegisterUIError(f func(string, error, bool) string) {
+func RegisterError(f func(string, error, bool) string) {
 	errorFmtFunc = f
 }
 
@@ -152,6 +150,11 @@ func uniqueEntries(paths []string) []string {
 		}
 	}
 	return m.ToSlice()
+}
+
+// SetDeploymentID -- Deployment Id from the main package is set here
+func SetDeploymentID(deploymentID string) {
+	globalDeploymentID = deploymentID
 }
 
 // Init sets the trimStrings to possible GOPATHs
@@ -266,36 +269,59 @@ func hashString(input string) string {
 	return hex.EncodeToString(checksum)
 }
 
+// Kind specifies the kind of error log
+type Kind string
+
+const (
+	// Minio errors
+	Minio Kind = "MINIO"
+	// Application errors
+	Application Kind = "APPLICATION"
+	// All errors
+	All Kind = "ALL"
+)
+
 // LogAlwaysIf prints a detailed error message during
 // the execution of the server.
-func LogAlwaysIf(ctx context.Context, err error) {
+func LogAlwaysIf(ctx context.Context, err error, errKind ...interface{}) {
 	if err == nil {
 		return
 	}
 
-	logIf(ctx, err)
+	logIf(ctx, err, errKind...)
 }
 
 // LogIf prints a detailed error message during
 // the execution of the server, if it is not an
 // ignored error.
-func LogIf(ctx context.Context, err error) {
+func LogIf(ctx context.Context, err error, errKind ...interface{}) {
 	if err == nil {
 		return
 	}
 
-	if err.Error() != diskNotFoundError {
-		logIf(ctx, err)
+	if errors.Is(err, context.Canceled) {
+		return
 	}
+
+	if err.Error() == http.ErrServerClosed.Error() || err.Error() == "disk not found" {
+		return
+	}
+
+	logIf(ctx, err, errKind...)
 }
 
 // logIf prints a detailed error message during
 // the execution of the server.
-func logIf(ctx context.Context, err error) {
+func logIf(ctx context.Context, err error, errKind ...interface{}) {
 	if Disable {
 		return
 	}
-
+	logKind := string(Minio)
+	if len(errKind) > 0 {
+		if ek, ok := errKind[0].(Kind); ok {
+			logKind = string(ek)
+		}
+	}
 	req := GetReqInfo(ctx)
 
 	if req == nil {
@@ -307,8 +333,9 @@ func logIf(ctx context.Context, err error) {
 		API = req.API
 	}
 
-	tags := make(map[string]string)
-	for _, entry := range req.GetTags() {
+	kv := req.GetTags()
+	tags := make(map[string]interface{}, len(kv))
+	for _, entry := range kv {
 		tags[entry.Key] = entry.Val
 	}
 
@@ -316,12 +343,16 @@ func logIf(ctx context.Context, err error) {
 	trace := getTrace(3)
 
 	// Get the cause for the Error
-	message := err.Error()
-
+	message := fmt.Sprintf("%v (%T)", err, err)
+	if req.DeploymentID == "" {
+		req.DeploymentID = globalDeploymentID
+	}
 	entry := log.Entry{
 		DeploymentID: req.DeploymentID,
 		Level:        ErrorLvl.String(),
+		LogKind:      logKind,
 		RemoteHost:   req.RemoteHost,
+		Host:         req.Host,
 		RequestID:    req.RequestID,
 		UserAgent:    req.UserAgent,
 		Time:         time.Now().UTC().Format(time.RFC3339Nano),
@@ -343,13 +374,13 @@ func logIf(ctx context.Context, err error) {
 		entry.API.Args.Bucket = hashString(entry.API.Args.Bucket)
 		entry.API.Args.Object = hashString(entry.API.Args.Object)
 		entry.RemoteHost = hashString(entry.RemoteHost)
-		entry.Message = reflect.TypeOf(err).String()
-		entry.Trace.Variables = make(map[string]string)
+		entry.Trace.Message = reflect.TypeOf(err).String()
+		entry.Trace.Variables = make(map[string]interface{})
 	}
 
 	// Iterate over all logger targets to send the log entry
 	for _, t := range Targets {
-		t.Send(entry)
+		t.Send(entry, entry.LogKind)
 	}
 }
 
@@ -358,9 +389,9 @@ var ErrCritical struct{}
 
 // CriticalIf logs the provided error on the console. It fails the
 // current go-routine by causing a `panic(ErrCritical)`.
-func CriticalIf(ctx context.Context, err error) {
+func CriticalIf(ctx context.Context, err error, errKind ...interface{}) {
 	if err != nil {
-		LogIf(ctx, err)
+		LogIf(ctx, err, errKind...)
 		panic(ErrCritical)
 	}
 }

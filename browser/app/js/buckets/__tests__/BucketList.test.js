@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,13 +29,13 @@ jest.mock("../../web", () => ({
 describe("BucketList", () => {
   it("should render without crashing", () => {
     const fetchBuckets = jest.fn()
-    shallow(<BucketList visibleBuckets={[]} fetchBuckets={fetchBuckets} />)
+    shallow(<BucketList filteredBuckets={[]} fetchBuckets={fetchBuckets} />)
   })
 
   it("should call fetchBuckets before component is mounted", () => {
     const fetchBuckets = jest.fn()
     const wrapper = shallow(
-      <BucketList visibleBuckets={[]} fetchBuckets={fetchBuckets} />
+      <BucketList filteredBuckets={[]} fetchBuckets={fetchBuckets} />
     )
     expect(fetchBuckets).toHaveBeenCalled()
   })
@@ -46,7 +46,7 @@ describe("BucketList", () => {
     history.push("/bk1/pre1")
     const wrapper = shallow(
       <BucketList
-        visibleBuckets={[]}
+        filteredBuckets={[]}
         setBucketList={setBucketList}
         selectBucket={selectBucket}
       />

@@ -1,24 +1,30 @@
-/*
- * Minio Cloud Storage, (C) 2019 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package sql
 
 import (
+	"encoding/json"
 	"errors"
-	"strings"
+	"fmt"
+	"math"
+
+	"github.com/bcicen/jstream"
+	"github.com/minio/simdjson-go"
 )
 
 var (
@@ -41,21 +47,21 @@ var (
 // of child nodes. The final result row is returned after all rows are
 // processed, and the `getAggregate` function is called.
 
-func (e *AliasedExpression) evalNode(r Record) (*Value, error) {
-	return e.Expression.evalNode(r)
+func (e *AliasedExpression) evalNode(r Record, tableAlias string) (*Value, error) {
+	return e.Expression.evalNode(r, tableAlias)
 }
 
-func (e *Expression) evalNode(r Record) (*Value, error) {
+func (e *Expression) evalNode(r Record, tableAlias string) (*Value, error) {
 	if len(e.And) == 1 {
 		// In this case, result is not required to be boolean
 		// type.
-		return e.And[0].evalNode(r)
+		return e.And[0].evalNode(r, tableAlias)
 	}
 
 	// Compute OR of conditions
 	result := false
 	for _, ex := range e.And {
-		res, err := ex.evalNode(r)
+		res, err := ex.evalNode(r, tableAlias)
 		if err != nil {
 			return nil, err
 		}
@@ -68,16 +74,16 @@ func (e *Expression) evalNode(r Record) (*Value, error) {
 	return FromBool(result), nil
 }
 
-func (e *AndCondition) evalNode(r Record) (*Value, error) {
+func (e *AndCondition) evalNode(r Record, tableAlias string) (*Value, error) {
 	if len(e.Condition) == 1 {
 		// In this case, result does not have to be boolean
-		return e.Condition[0].evalNode(r)
+		return e.Condition[0].evalNode(r, tableAlias)
 	}
 
 	// Compute AND of conditions
 	result := true
 	for _, ex := range e.Condition {
-		res, err := ex.evalNode(r)
+		res, err := ex.evalNode(r, tableAlias)
 		if err != nil {
 			return nil, err
 		}
@@ -90,14 +96,14 @@ func (e *AndCondition) evalNode(r Record) (*Value, error) {
 	return FromBool(result), nil
 }
 
-func (e *Condition) evalNode(r Record) (*Value, error) {
+func (e *Condition) evalNode(r Record, tableAlias string) (*Value, error) {
 	if e.Operand != nil {
 		// In this case, result does not have to be boolean
-		return e.Operand.evalNode(r)
+		return e.Operand.evalNode(r, tableAlias)
 	}
 
 	// Compute NOT of condition
-	res, err := e.Not.evalNode(r)
+	res, err := e.Not.evalNode(r, tableAlias)
 	if err != nil {
 		return nil, err
 	}
@@ -108,8 +114,8 @@ func (e *Condition) evalNode(r Record) (*Value, error) {
 	return FromBool(!b), nil
 }
 
-func (e *ConditionOperand) evalNode(r Record) (*Value, error) {
-	opVal, opErr := e.Operand.evalNode(r)
+func (e *ConditionOperand) evalNode(r Record, tableAlias string) (*Value, error) {
+	opVal, opErr := e.Operand.evalNode(r, tableAlias)
 	if opErr != nil || e.ConditionRHS == nil {
 		return opVal, opErr
 	}
@@ -117,7 +123,7 @@ func (e *ConditionOperand) evalNode(r Record) (*Value, error) {
 	// Need to evaluate the ConditionRHS
 	switch {
 	case e.ConditionRHS.Compare != nil:
-		cmpRight, cmpRErr := e.ConditionRHS.Compare.Operand.evalNode(r)
+		cmpRight, cmpRErr := e.ConditionRHS.Compare.Operand.evalNode(r, tableAlias)
 		if cmpRErr != nil {
 			return nil, cmpRErr
 		}
@@ -126,26 +132,26 @@ func (e *ConditionOperand) evalNode(r Record) (*Value, error) {
 		return FromBool(b), err
 
 	case e.ConditionRHS.Between != nil:
-		return e.ConditionRHS.Between.evalBetweenNode(r, opVal)
+		return e.ConditionRHS.Between.evalBetweenNode(r, opVal, tableAlias)
 
 	case e.ConditionRHS.Like != nil:
-		return e.ConditionRHS.Like.evalLikeNode(r, opVal)
+		return e.ConditionRHS.Like.evalLikeNode(r, opVal, tableAlias)
 
 	case e.ConditionRHS.In != nil:
-		return e.ConditionRHS.In.evalInNode(r, opVal)
+		return e.ConditionRHS.In.evalInNode(r, opVal, tableAlias)
 
 	default:
 		return nil, errInvalidASTNode
 	}
 }
 
-func (e *Between) evalBetweenNode(r Record, arg *Value) (*Value, error) {
-	stVal, stErr := e.Start.evalNode(r)
+func (e *Between) evalBetweenNode(r Record, arg *Value, tableAlias string) (*Value, error) {
+	stVal, stErr := e.Start.evalNode(r, tableAlias)
 	if stErr != nil {
 		return nil, stErr
 	}
 
-	endVal, endErr := e.End.evalNode(r)
+	endVal, endErr := e.End.evalNode(r, tableAlias)
 	if endErr != nil {
 		return nil, endErr
 	}
@@ -168,7 +174,7 @@ func (e *Between) evalBetweenNode(r Record, arg *Value) (*Value, error) {
 	return FromBool(result), nil
 }
 
-func (e *Like) evalLikeNode(r Record, arg *Value) (*Value, error) {
+func (e *Like) evalLikeNode(r Record, arg *Value, tableAlias string) (*Value, error) {
 	inferTypeAsString(arg)
 
 	s, ok := arg.ToString()
@@ -177,7 +183,7 @@ func (e *Like) evalLikeNode(r Record, arg *Value) (*Value, error) {
 		return nil, errLikeInvalidInputs(err)
 	}
 
-	pattern, err1 := e.Pattern.evalNode(r)
+	pattern, err1 := e.Pattern.evalNode(r, tableAlias)
 	if err1 != nil {
 		return nil, err1
 	}
@@ -193,7 +199,7 @@ func (e *Like) evalLikeNode(r Record, arg *Value) (*Value, error) {
 
 	escape := runeZero
 	if e.EscapeChar != nil {
-		escapeVal, err2 := e.EscapeChar.evalNode(r)
+		escapeVal, err2 := e.EscapeChar.evalNode(r, tableAlias)
 		if err2 != nil {
 			return nil, err2
 		}
@@ -224,32 +230,82 @@ func (e *Like) evalLikeNode(r Record, arg *Value) (*Value, error) {
 	return FromBool(matchResult), nil
 }
 
-func (e *In) evalInNode(r Record, arg *Value) (*Value, error) {
-	result := false
-	for _, elt := range e.Expressions {
-		eltVal, err := elt.evalNode(r)
+func (e *ListExpr) evalNode(r Record, tableAlias string) (*Value, error) {
+	res := make([]Value, len(e.Elements))
+	if len(e.Elements) == 1 {
+		// If length 1, treat as single value.
+		return e.Elements[0].evalNode(r, tableAlias)
+	}
+	for i, elt := range e.Elements {
+		v, err := elt.evalNode(r, tableAlias)
 		if err != nil {
 			return nil, err
 		}
-
-		// FIXME: type inference?
-
-		// Types must match.
-		if arg.vType != eltVal.vType {
-			// match failed.
-			continue
-		}
-
-		if arg.value == eltVal.value {
-			result = true
-			break
-		}
+		res[i] = *v
 	}
-	return FromBool(result), nil
+	return FromArray(res), nil
 }
 
-func (e *Operand) evalNode(r Record) (*Value, error) {
-	lval, lerr := e.Left.evalNode(r)
+const floatCmpTolerance = 0.000001
+
+func (e *In) evalInNode(r Record, lhs *Value, tableAlias string) (*Value, error) {
+	// Compare two values in terms of in-ness.
+	var cmp func(a, b Value) bool
+	cmp = func(a, b Value) bool {
+		// Convert if needed.
+		inferTypesForCmp(&a, &b)
+
+		if a.Equals(b) {
+			return true
+		}
+
+		// If elements, compare each.
+		aA, aOK := a.ToArray()
+		bA, bOK := b.ToArray()
+		if aOK && bOK {
+			if len(aA) != len(bA) {
+				return false
+			}
+			for i := range aA {
+				if !cmp(aA[i], bA[i]) {
+					return false
+				}
+			}
+			return true
+		}
+		// Try as numbers
+		aF, aOK := a.ToFloat()
+		bF, bOK := b.ToFloat()
+
+		diff := math.Abs(aF - bF)
+		return aOK && bOK && diff < floatCmpTolerance
+	}
+
+	var rhs Value
+	if elt := e.ListExpression; elt != nil {
+		eltVal, err := elt.evalNode(r, tableAlias)
+		if err != nil {
+			return nil, err
+		}
+		rhs = *eltVal
+	}
+
+	// If RHS is array compare each element.
+	if arr, ok := rhs.ToArray(); ok {
+		for _, element := range arr {
+			// If we have an array we are on the wrong level.
+			if cmp(element, *lhs) {
+				return FromBool(true), nil
+			}
+		}
+		return FromBool(false), nil
+	}
+
+	return FromBool(cmp(rhs, *lhs)), nil
+}
+
+func (e *Operand) evalNode(r Record, tableAlias string) (*Value, error) {
+	lval, lerr := e.Left.evalNode(r, tableAlias)
 	if lerr != nil || len(e.Right) == 0 {
 		return lval, lerr
 	}
@@ -259,7 +315,7 @@ func (e *Operand) evalNode(r Record) (*Value, error) {
 	// symbols.
 	for _, rightTerm := range e.Right {
 		op := rightTerm.Op
-		rval, rerr := rightTerm.Right.evalNode(r)
+		rval, rerr := rightTerm.Right.evalNode(r, tableAlias)
 		if rerr != nil {
 			return nil, rerr
 		}
@@ -271,8 +327,8 @@ func (e *Operand) evalNode(r Record) (*Value, error) {
 	return lval, nil
 }
 
-func (e *MultOp) evalNode(r Record) (*Value, error) {
-	lval, lerr := e.Left.evalNode(r)
+func (e *MultOp) evalNode(r Record, tableAlias string) (*Value, error) {
+	lval, lerr := e.Left.evalNode(r, tableAlias)
 	if lerr != nil || len(e.Right) == 0 {
 		return lval, lerr
 	}
@@ -281,7 +337,7 @@ func (e *MultOp) evalNode(r Record) (*Value, error) {
 	// AST node is for terms separated by *, / or % symbols.
 	for _, rightTerm := range e.Right {
 		op := rightTerm.Op
-		rval, rerr := rightTerm.Right.evalNode(r)
+		rval, rerr := rightTerm.Right.evalNode(r, tableAlias)
 		if rerr != nil {
 			return nil, rerr
 		}
@@ -294,12 +350,12 @@ func (e *MultOp) evalNode(r Record) (*Value, error) {
 	return lval, nil
 }
 
-func (e *UnaryTerm) evalNode(r Record) (*Value, error) {
+func (e *UnaryTerm) evalNode(r Record, tableAlias string) (*Value, error) {
 	if e.Negated == nil {
-		return e.Primary.evalNode(r)
+		return e.Primary.evalNode(r, tableAlias)
 	}
 
-	v, err := e.Negated.Term.evalNode(r)
+	v, err := e.Negated.Term.evalNode(r, tableAlias)
 	if err != nil {
 		return nil, err
 	}
@@ -312,36 +368,106 @@ func (e *UnaryTerm) evalNode(r Record) (*Value, error) {
 	return nil, errArithMismatchedTypes
 }
 
-func (e *JSONPath) evalNode(r Record) (*Value, error) {
-	// Strip the table name from the keypath.
-	keypath := e.String()
-	ps := strings.SplitN(keypath, ".", 2)
-	if len(ps) == 2 {
-		keypath = ps[1]
+func (e *JSONPath) evalNode(r Record, tableAlias string) (*Value, error) {
+	alias := tableAlias
+	if tableAlias == "" {
+		alias = baseTableName
 	}
-	return r.Get(keypath)
+	pathExpr := e.StripTableAlias(alias)
+	_, rawVal := r.Raw()
+	switch rowVal := rawVal.(type) {
+	case jstream.KVS, simdjson.Object:
+		if len(pathExpr) == 0 {
+			pathExpr = []*JSONPathElement{{Key: &ObjectKey{ID: e.BaseKey}}}
+		}
+
+		result, _, err := jsonpathEval(pathExpr, rowVal)
+		if err != nil {
+			return nil, err
+		}
+
+		return jsonToValue(result)
+	default:
+		if pathExpr[len(pathExpr)-1].Key == nil {
+			return nil, errInvalidKeypath
+		}
+		return r.Get(pathExpr[len(pathExpr)-1].Key.keyString())
+	}
 }
 
-func (e *PrimaryTerm) evalNode(r Record) (res *Value, err error) {
+// jsonToValue will convert the json value to an internal value.
+func jsonToValue(result interface{}) (*Value, error) {
+	switch rval := result.(type) {
+	case string:
+		return FromString(rval), nil
+	case float64:
+		return FromFloat(rval), nil
+	case int64:
+		return FromInt(rval), nil
+	case uint64:
+		if rval <= math.MaxInt64 {
+			return FromInt(int64(rval)), nil
+		}
+		return FromFloat(float64(rval)), nil
+	case bool:
+		return FromBool(rval), nil
+	case jstream.KVS:
+		bs, err := json.Marshal(result)
+		if err != nil {
+			return nil, err
+		}
+		return FromBytes(bs), nil
+	case []interface{}:
+		dst := make([]Value, len(rval))
+		for i := range rval {
+			v, err := jsonToValue(rval[i])
+			if err != nil {
+				return nil, err
+			}
+			dst[i] = *v
+		}
+		return FromArray(dst), nil
+	case simdjson.Object:
+		o := rval
+		elems, err := o.Parse(nil)
+		if err != nil {
+			return nil, err
+		}
+		bs, err := elems.MarshalJSON()
+		if err != nil {
+			return nil, err
+		}
+		return FromBytes(bs), nil
+	case []Value:
+		return FromArray(rval), nil
+	case nil:
+		return FromNull(), nil
+	}
+	return nil, fmt.Errorf("Unhandled value type: %T", result)
+}
+
+func (e *PrimaryTerm) evalNode(r Record, tableAlias string) (res *Value, err error) {
 	switch {
 	case e.Value != nil:
 		return e.Value.evalNode(r)
 	case e.JPathExpr != nil:
-		return e.JPathExpr.evalNode(r)
+		return e.JPathExpr.evalNode(r, tableAlias)
+	case e.ListExpr != nil:
+		return e.ListExpr.evalNode(r, tableAlias)
 	case e.SubExpression != nil:
-		return e.SubExpression.evalNode(r)
+		return e.SubExpression.evalNode(r, tableAlias)
 	case e.FuncCall != nil:
-		return e.FuncCall.evalNode(r)
+		return e.FuncCall.evalNode(r, tableAlias)
 	}
 	return nil, errInvalidASTNode
 }
 
-func (e *FuncExpr) evalNode(r Record) (res *Value, err error) {
+func (e *FuncExpr) evalNode(r Record, tableAlias string) (res *Value, err error) {
 	switch e.getFunctionName() {
 	case aggFnCount, aggFnAvg, aggFnMax, aggFnMin, aggFnSum:
 		return e.getAggregate()
 	default:
-		return e.evalSQLFnNode(r)
+		return e.evalSQLFnNode(r, tableAlias)
 	}
 }
 
@@ -349,8 +475,13 @@ func (e *FuncExpr) evalNode(r Record) (res *Value, err error) {
 // aggregation or a row function - it always returns a value.
 func (e *LitValue) evalNode(_ Record) (res *Value, err error) {
 	switch {
-	case e.Number != nil:
-		return floatToValue(*e.Number), nil
+	case e.Int != nil:
+		if *e.Int < math.MaxInt64 && *e.Int > math.MinInt64 {
+			return FromInt(int64(*e.Int)), nil
+		}
+		return FromFloat(*e.Int), nil
+	case e.Float != nil:
+		return FromFloat(*e.Float), nil
 	case e.String != nil:
 		return FromString(string(*e.String)), nil
 	case e.Boolean != nil:

@@ -1,25 +1,27 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package logger
 
 import (
 	"context"
+	"errors"
+	"net/http"
 	"sync"
-
 	"time"
 )
 
@@ -30,7 +32,7 @@ type logOnceType struct {
 }
 
 // One log message per error.
-func (l *logOnceType) logOnceIf(ctx context.Context, err error, id interface{}) {
+func (l *logOnceType) logOnceIf(ctx context.Context, err error, id interface{}, errKind ...interface{}) {
 	if err == nil {
 		return
 	}
@@ -49,7 +51,7 @@ func (l *logOnceType) logOnceIf(ctx context.Context, err error, id interface{}) 
 	l.Unlock()
 
 	if shouldLog {
-		LogIf(ctx, err)
+		LogIf(ctx, err, errKind...)
 	}
 }
 
@@ -76,6 +78,18 @@ var logOnce = newLogOnceType()
 // LogOnceIf - Logs notification errors - once per error.
 // id is a unique identifier for related log messages, refer to cmd/notification.go
 // on how it is used.
-func LogOnceIf(ctx context.Context, err error, id interface{}) {
-	logOnce.logOnceIf(ctx, err, id)
+func LogOnceIf(ctx context.Context, err error, id interface{}, errKind ...interface{}) {
+	if err == nil {
+		return
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+
+	if err.Error() == http.ErrServerClosed.Error() || err.Error() == "disk not found" {
+		return
+	}
+
+	logOnce.logOnceIf(ctx, err, id, errKind...)
 }

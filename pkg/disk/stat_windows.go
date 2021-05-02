@@ -1,37 +1,42 @@
 // +build windows
 
-/*
- * Minio Cloud Storage, (C) 2015 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package disk
 
 import (
+	"fmt"
 	"os"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 var (
-	kernel32 = syscall.NewLazyDLL("kernel32.dll")
+	kernel32 = windows.NewLazySystemDLL("kernel32.dll")
 
 	// GetDiskFreeSpaceEx - https://msdn.microsoft.com/en-us/library/windows/desktop/aa364937(v=vs.85).aspx
 	// Retrieves information about the amount of space that is available on a disk volume,
 	// which is the total amount of space, the total amount of free space, and the total
 	// amount of free space available to the user that is associated with the calling thread.
 	GetDiskFreeSpaceEx = kernel32.NewProc("GetDiskFreeSpaceExW")
+
 	// GetDiskFreeSpace - https://msdn.microsoft.com/en-us/library/windows/desktop/aa364935(v=vs.85).aspx
 	// Retrieves information about the specified disk, including the amount of free space on the disk.
 	GetDiskFreeSpace = kernel32.NewProc("GetDiskFreeSpaceW")
@@ -62,10 +67,18 @@ func GetInfo(path string) (info Info, err error) {
 		uintptr(unsafe.Pointer(&lpFreeBytesAvailable)),
 		uintptr(unsafe.Pointer(&lpTotalNumberOfBytes)),
 		uintptr(unsafe.Pointer(&lpTotalNumberOfFreeBytes)))
-	info = Info{}
-	info.Total = uint64(lpTotalNumberOfBytes)
-	info.Free = uint64(lpFreeBytesAvailable)
-	info.FSType = getFSType(path)
+
+	if uint64(lpTotalNumberOfFreeBytes) > uint64(lpTotalNumberOfBytes) {
+		return info, fmt.Errorf("detected free space (%d) > total disk space (%d), fs corruption at (%s). please run 'fsck'",
+			uint64(lpTotalNumberOfFreeBytes), uint64(lpTotalNumberOfBytes), path)
+	}
+
+	info = Info{
+		Total:  uint64(lpTotalNumberOfBytes),
+		Free:   uint64(lpTotalNumberOfFreeBytes),
+		Used:   uint64(lpTotalNumberOfBytes) - uint64(lpTotalNumberOfFreeBytes),
+		FSType: getFSType(path),
+	}
 
 	// Return values of GetDiskFreeSpace()
 	lpSectorsPerCluster := uint32(0)

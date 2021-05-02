@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2016, 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,7 +36,7 @@ export class Dropzone extends React.Component {
     // Overwrite the default styling from react-dropzone; otherwise it
     // won't handle child elements correctly.
     const style = {
-      height: "100%",
+      flex: "1",
       borderWidth: "0",
       borderStyle: "dashed",
       borderColor: "#fff"
@@ -48,18 +48,29 @@ export class Dropzone extends React.Component {
     const rejectStyle = {
       backgroundColor: "#ffdddd"
     }
+    const getStyle = (isDragActive, isDragAccept, isDragReject) => ({
+      ...style,
+      ...(isDragActive ? activeStyle : {}),
+      ...(isDragReject ? rejectStyle : {})
+    })
 
     // disableClick means that it won't trigger a file upload box when
     // the user clicks on a file.
     return (
       <ReactDropzone
-        style={style}
-        activeStyle={activeStyle}
-        rejectStyle={rejectStyle}
-        disableClick={true}
         onDrop={this.onDrop.bind(this)}
       >
-        {this.props.children}
+        {({getRootProps, getInputProps, isDragActive, isDragAccept, isDragReject}) => (
+          <div
+            {...getRootProps({
+              onClick: event => event.stopPropagation()
+            })}
+            style={getStyle(isDragActive, isDragAccept, isDragReject)}
+          >
+            <input {...getInputProps()} />
+            {this.props.children}
+          </div>
+        )}
       </ReactDropzone>
     )
   }

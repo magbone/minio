@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,22 +17,32 @@
 import React from "react"
 import { connect } from "react-redux"
 import ObjectItem from "./ObjectItem"
+import PrefixActions from "./PrefixActions"
 import * as actionsObjects from "./actions"
+import { getCheckedList } from "./selectors"
 
-export const PrefixContainer = ({ object, currentPrefix, selectPrefix }) => {
+export const PrefixContainer = ({
+  object,
+  currentPrefix,
+  checkedObjectsCount,
+  selectPrefix
+}) => {
   const props = {
     name: object.name,
     contentType: object.contentType,
     onClick: () => selectPrefix(`${currentPrefix}${object.name}`)
   }
-
+  if (checkedObjectsCount == 0) {
+    props.actionButtons = <PrefixActions object={object} />
+  }
   return <ObjectItem {...props} />
 }
 
 const mapStateToProps = (state, ownProps) => {
   return {
     object: ownProps.object,
-    currentPrefix: state.objects.currentPrefix
+    currentPrefix: state.objects.currentPrefix,
+    checkedObjectsCount: getCheckedList(state).length
   }
 }
 

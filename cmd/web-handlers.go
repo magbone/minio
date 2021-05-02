@@ -1,59 +1,84 @@
-/*
- * Minio Cloud Storage, (C) 2016, 2017, 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
-	"archive/zip"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	humanize "github.com/dustin/go-humanize"
-	snappy "github.com/golang/snappy"
 	"github.com/gorilla/mux"
-	"github.com/gorilla/rpc/v2/json2"
-	miniogopolicy "github.com/minio/minio-go/pkg/policy"
-	"github.com/minio/minio-go/pkg/s3utils"
-	"github.com/minio/minio/browser"
+	"github.com/klauspost/compress/zip"
+	"github.com/minio/minio-go/v7"
+	miniogo "github.com/minio/minio-go/v7"
+	miniogopolicy "github.com/minio/minio-go/v7/pkg/policy"
+	"github.com/minio/minio-go/v7/pkg/s3utils"
+
+	"github.com/minio/minio/cmd/config/dns"
+	"github.com/minio/minio/cmd/config/identity/openid"
 	"github.com/minio/minio/cmd/crypto"
+	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
-	"github.com/minio/minio/pkg/dns"
+	objectlock "github.com/minio/minio/pkg/bucket/object/lock"
+	"github.com/minio/minio/pkg/bucket/policy"
+	"github.com/minio/minio/pkg/bucket/replication"
+	"github.com/minio/minio/pkg/etag"
 	"github.com/minio/minio/pkg/event"
 	"github.com/minio/minio/pkg/handlers"
 	"github.com/minio/minio/pkg/hash"
-	"github.com/minio/minio/pkg/iam/policy"
+	iampolicy "github.com/minio/minio/pkg/iam/policy"
 	"github.com/minio/minio/pkg/ioutil"
-	"github.com/minio/minio/pkg/policy"
+	"github.com/minio/rpc/json2"
 )
 
+func extractBucketObject(args reflect.Value) (bucketName, objectName string) {
+	switch args.Kind() {
+	case reflect.Ptr:
+		a := args.Elem()
+		for i := 0; i < a.NumField(); i++ {
+			switch a.Type().Field(i).Name {
+			case "BucketName":
+				bucketName = a.Field(i).String()
+			case "Prefix":
+				objectName = a.Field(i).String()
+			case "ObjectName":
+				objectName = a.Field(i).String()
+			}
+		}
+	}
+	return bucketName, objectName
+}
+
 // WebGenericArgs - empty struct for calls that don't accept arguments
-// for ex. ServerInfo, GenerateAuth
+// for ex. ServerInfo
 type WebGenericArgs struct{}
 
 // WebGenericRep - reply structure for calls for which reply is success/failure
@@ -69,70 +94,68 @@ type ServerInfoRep struct {
 	MinioPlatform   string
 	MinioRuntime    string
 	MinioGlobalInfo map[string]interface{}
+	MinioUserInfo   map[string]interface{}
 	UIVersion       string `json:"uiVersion"`
 }
 
 // ServerInfo - get server info.
 func (web *webAPIHandlers) ServerInfo(r *http.Request, args *WebGenericArgs, reply *ServerInfoRep) error {
-	_, owner, authErr := webRequestAuthenticate(r)
+	ctx := newWebContext(r, args, "WebServerInfo")
+	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
 	host, err := os.Hostname()
 	if err != nil {
 		host = ""
 	}
-	memstats := &runtime.MemStats{}
-	runtime.ReadMemStats(memstats)
-	mem := fmt.Sprintf("Used: %s | Allocated: %s | Used-Heap: %s | Allocated-Heap: %s",
-		humanize.Bytes(memstats.Alloc),
-		humanize.Bytes(memstats.TotalAlloc),
-		humanize.Bytes(memstats.HeapAlloc),
-		humanize.Bytes(memstats.HeapSys))
 	platform := fmt.Sprintf("Host: %s | OS: %s | Arch: %s",
 		host,
 		runtime.GOOS,
 		runtime.GOARCH)
-	goruntime := fmt.Sprintf("Version: %s | CPUs: %s", runtime.Version(), strconv.Itoa(runtime.NumCPU()))
+	goruntime := fmt.Sprintf("Version: %s | CPUs: %d", runtime.Version(), runtime.NumCPU())
 
 	reply.MinioVersion = Version
 	reply.MinioGlobalInfo = getGlobalInfo()
-	// If ENV creds are not set and incoming user is not owner
-	// disable changing credentials.
-	v, ok := reply.MinioGlobalInfo["isEnvCreds"].(bool)
-	if ok && !v {
-		reply.MinioGlobalInfo["isEnvCreds"] = !owner
-	}
-	// if etcd is set disallow changing credentials through UI
-	if globalEtcdClient != nil {
-		reply.MinioGlobalInfo["isEnvCreds"] = true
+
+	// Check if the user is IAM user.
+	reply.MinioUserInfo = map[string]interface{}{
+		"isIAMUser": !owner,
 	}
 
-	reply.MinioMemory = mem
+	if !owner {
+		creds, ok := globalIAMSys.GetUser(claims.AccessKey)
+		if ok && creds.SessionToken != "" {
+			reply.MinioUserInfo["isTempUser"] = true
+		}
+	}
+
 	reply.MinioPlatform = platform
 	reply.MinioRuntime = goruntime
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	return nil
 }
 
 // StorageInfoRep - contains storage usage statistics.
 type StorageInfoRep struct {
-	StorageInfo StorageInfo `json:"storageInfo"`
-	UIVersion   string      `json:"uiVersion"`
+	Used      uint64 `json:"used"`
+	UIVersion string `json:"uiVersion"`
 }
 
 // StorageInfo - web call to gather storage usage statistics.
-func (web *webAPIHandlers) StorageInfo(r *http.Request, args *AuthArgs, reply *StorageInfoRep) error {
+func (web *webAPIHandlers) StorageInfo(r *http.Request, args *WebGenericArgs, reply *StorageInfoRep) error {
+	ctx := newWebContext(r, args, "WebStorageInfo")
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
-		return toJSONError(errServerNotInitialized)
+		return toJSONError(ctx, errServerNotInitialized)
 	}
 	_, _, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
-	reply.StorageInfo = objectAPI.StorageInfo(context.Background())
-	reply.UIVersion = browser.UIVersion
+	dataUsageInfo, _ := loadDataUsageFromBackend(ctx, objectAPI)
+	reply.Used = dataUsageInfo.ObjectsTotalSize
+	reply.UIVersion = Version
 	return nil
 }
 
@@ -143,49 +166,76 @@ type MakeBucketArgs struct {
 
 // MakeBucket - creates a new bucket.
 func (web *webAPIHandlers) MakeBucket(r *http.Request, args *MakeBucketArgs, reply *WebGenericRep) error {
+	ctx := newWebContext(r, args, "WebMakeBucket")
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
-		return toJSONError(errServerNotInitialized)
+		return toJSONError(ctx, errServerNotInitialized)
 	}
-	_, owner, authErr := webRequestAuthenticate(r)
+	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
 
-	if !owner {
-		return toJSONError(errAccessDenied)
+	// For authenticated users apply IAM policy.
+	if !globalIAMSys.IsAllowed(iampolicy.Args{
+		AccountName:     claims.AccessKey,
+		Action:          iampolicy.CreateBucketAction,
+		BucketName:      args.BucketName,
+		ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+		IsOwner:         owner,
+		Claims:          claims.Map(),
+	}) {
+		return toJSONError(ctx, errAccessDenied)
 	}
 
 	// Check if bucket is a reserved bucket name or invalid.
-	if isReservedOrInvalidBucket(args.BucketName) {
-		return toJSONError(errInvalidBucketName)
+	if isReservedOrInvalidBucket(args.BucketName, true) {
+		return toJSONError(ctx, errInvalidBucketName, args.BucketName)
+	}
+
+	opts := BucketOptions{
+		Location:    globalServerRegion,
+		LockEnabled: false,
 	}
 
 	if globalDNSConfig != nil {
 		if _, err := globalDNSConfig.Get(args.BucketName); err != nil {
-			if err == dns.ErrNoEntriesFound {
+			if err == dns.ErrNoEntriesFound || err == dns.ErrNotImplemented {
 				// Proceed to creating a bucket.
-				if err = objectAPI.MakeBucketWithLocation(context.Background(), args.BucketName, globalServerConfig.GetRegion()); err != nil {
-					return toJSONError(err)
-				}
-				if err = globalDNSConfig.Put(args.BucketName); err != nil {
-					objectAPI.DeleteBucket(context.Background(), args.BucketName)
-					return toJSONError(err)
+				if err = objectAPI.MakeBucketWithLocation(ctx, args.BucketName, opts); err != nil {
+					return toJSONError(ctx, err)
 				}
 
-				reply.UIVersion = browser.UIVersion
+				if err = globalDNSConfig.Put(args.BucketName); err != nil {
+					objectAPI.DeleteBucket(ctx, args.BucketName, false)
+					return toJSONError(ctx, err)
+				}
+
+				reply.UIVersion = Version
 				return nil
 			}
-			return toJSONError(err)
+			return toJSONError(ctx, err)
 		}
-		return toJSONError(errBucketAlreadyExists)
+		return toJSONError(ctx, errBucketAlreadyExists)
 	}
 
-	if err := objectAPI.MakeBucketWithLocation(context.Background(), args.BucketName, globalServerConfig.GetRegion()); err != nil {
-		return toJSONError(err, args.BucketName)
+	if err := objectAPI.MakeBucketWithLocation(ctx, args.BucketName, opts); err != nil {
+		return toJSONError(ctx, err, args.BucketName)
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
+
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.GetAccessKey()
+
+	sendEvent(eventArgs{
+		EventName:  event.BucketCreated,
+		BucketName: args.BucketName,
+		ReqParams:  reqParams,
+		UserAgent:  r.UserAgent(),
+		Host:       handlers.GetSourceIP(r),
+	})
+
 	return nil
 }
 
@@ -196,63 +246,80 @@ type RemoveBucketArgs struct {
 
 // DeleteBucket - removes a bucket, must be empty.
 func (web *webAPIHandlers) DeleteBucket(r *http.Request, args *RemoveBucketArgs, reply *WebGenericRep) error {
+	ctx := newWebContext(r, args, "WebDeleteBucket")
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
-		return toJSONError(errServerNotInitialized)
+		return toJSONError(ctx, errServerNotInitialized)
 	}
-	_, owner, authErr := webRequestAuthenticate(r)
+	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
 
-	if !owner {
-		return toJSONError(errAccessDenied)
+	// For authenticated users apply IAM policy.
+	if !globalIAMSys.IsAllowed(iampolicy.Args{
+		AccountName:     claims.AccessKey,
+		Action:          iampolicy.DeleteBucketAction,
+		BucketName:      args.BucketName,
+		ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+		IsOwner:         owner,
+		Claims:          claims.Map(),
+	}) {
+		return toJSONError(ctx, errAccessDenied)
 	}
 
-	reply.UIVersion = browser.UIVersion
+	// Check if bucket is a reserved bucket name or invalid.
+	if isReservedOrInvalidBucket(args.BucketName, false) {
+		return toJSONError(ctx, errInvalidBucketName, args.BucketName)
+	}
 
-	if isRemoteCallRequired(context.Background(), args.BucketName, objectAPI) {
+	reply.UIVersion = Version
+
+	if isRemoteCallRequired(ctx, args.BucketName, objectAPI) {
 		sr, err := globalDNSConfig.Get(args.BucketName)
 		if err != nil {
 			if err == dns.ErrNoEntriesFound {
-				return toJSONError(BucketNotFound{
+				return toJSONError(ctx, BucketNotFound{
 					Bucket: args.BucketName,
 				}, args.BucketName)
 			}
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 		core, err := getRemoteInstanceClient(r, getHostFromSrv(sr))
 		if err != nil {
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
-		if err = core.RemoveBucket(args.BucketName); err != nil {
-			return toJSONError(err, args.BucketName)
+		if err = core.RemoveBucket(ctx, args.BucketName); err != nil {
+			return toJSONError(ctx, err, args.BucketName)
 		}
 		return nil
 	}
 
-	ctx := context.Background()
-
 	deleteBucket := objectAPI.DeleteBucket
-	if web.CacheAPI() != nil {
-		deleteBucket = web.CacheAPI().DeleteBucket
+
+	if err := deleteBucket(ctx, args.BucketName, false); err != nil {
+		return toJSONError(ctx, err, args.BucketName)
 	}
 
-	if err := deleteBucket(ctx, args.BucketName); err != nil {
-		return toJSONError(err, args.BucketName)
-	}
-
-	globalNotificationSys.RemoveNotification(args.BucketName)
-	globalPolicySys.Remove(args.BucketName)
-	globalNotificationSys.DeleteBucket(ctx, args.BucketName)
+	globalNotificationSys.DeleteBucketMetadata(ctx, args.BucketName)
 
 	if globalDNSConfig != nil {
 		if err := globalDNSConfig.Delete(args.BucketName); err != nil {
-			// Deleting DNS entry failed, attempt to create the bucket again.
-			objectAPI.MakeBucketWithLocation(ctx, args.BucketName, "")
-			return toJSONError(err)
+			logger.LogIf(ctx, fmt.Errorf("Unable to delete bucket DNS entry %w, please delete it manually", err))
+			return toJSONError(ctx, err)
 		}
 	}
+
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.AccessKey
+
+	sendEvent(eventArgs{
+		EventName:  event.BucketRemoved,
+		BucketName: args.BucketName,
+		ReqParams:  reqParams,
+		UserAgent:  r.UserAgent(),
+		Host:       handlers.GetSourceIP(r),
+	})
 
 	return nil
 }
@@ -273,62 +340,62 @@ type WebBucketInfo struct {
 
 // ListBuckets - list buckets api.
 func (web *webAPIHandlers) ListBuckets(r *http.Request, args *WebGenericArgs, reply *ListBucketsRep) error {
+	ctx := newWebContext(r, args, "WebListBuckets")
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
-		return toJSONError(errServerNotInitialized)
+		return toJSONError(ctx, errServerNotInitialized)
 	}
 	listBuckets := objectAPI.ListBuckets
-	if web.CacheAPI() != nil {
-		listBuckets = web.CacheAPI().ListBuckets
-	}
 
 	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
 
 	// Set prefix value for "s3:prefix" policy conditionals.
 	r.Header.Set("prefix", "")
 
 	// Set delimiter value for "s3:delimiter" policy conditionals.
-	r.Header.Set("delimiter", slashSeparator)
+	r.Header.Set("delimiter", SlashSeparator)
 
 	// If etcd, dns federation configured list buckets from etcd.
-	if globalDNSConfig != nil {
+	if globalDNSConfig != nil && globalBucketFederation {
 		dnsBuckets, err := globalDNSConfig.List()
-		if err != nil {
-			return toJSONError(err)
+		if err != nil && !IsErrIgnored(err,
+			dns.ErrNoEntriesFound,
+			dns.ErrDomainMissing) {
+			return toJSONError(ctx, err)
 		}
-		for _, dnsRecord := range dnsBuckets {
-			bucketName := strings.Trim(dnsRecord.Key, "/")
-
+		for _, dnsRecords := range dnsBuckets {
 			if globalIAMSys.IsAllowed(iampolicy.Args{
-				AccountName:     claims.Subject,
+				AccountName:     claims.AccessKey,
 				Action:          iampolicy.ListBucketAction,
-				BucketName:      bucketName,
-				ConditionValues: getConditionValues(r, "", claims.Subject),
+				BucketName:      dnsRecords[0].Key,
+				ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
 				IsOwner:         owner,
 				ObjectName:      "",
+				Claims:          claims.Map(),
 			}) {
 				reply.Buckets = append(reply.Buckets, WebBucketInfo{
-					Name:         bucketName,
-					CreationDate: dnsRecord.CreationDate,
+					Name:         dnsRecords[0].Key,
+					CreationDate: dnsRecords[0].CreationDate,
 				})
 			}
 		}
 	} else {
-		buckets, err := listBuckets(context.Background())
+		buckets, err := listBuckets(ctx)
 		if err != nil {
-			return toJSONError(err)
+			return toJSONError(ctx, err)
 		}
 		for _, bucket := range buckets {
 			if globalIAMSys.IsAllowed(iampolicy.Args{
-				AccountName:     claims.Subject,
+				AccountName:     claims.AccessKey,
 				Action:          iampolicy.ListBucketAction,
 				BucketName:      bucket.Name,
-				ConditionValues: getConditionValues(r, "", claims.Subject),
+				ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
 				IsOwner:         owner,
 				ObjectName:      "",
+				Claims:          claims.Map(),
 			}) {
 				reply.Buckets = append(reply.Buckets, WebBucketInfo{
 					Name:         bucket.Name,
@@ -338,7 +405,7 @@ func (web *webAPIHandlers) ListBuckets(r *http.Request, args *WebGenericArgs, re
 		}
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	return nil
 }
 
@@ -351,11 +418,9 @@ type ListObjectsArgs struct {
 
 // ListObjectsRep - list objects response.
 type ListObjectsRep struct {
-	Objects     []WebObjectInfo `json:"objects"`
-	NextMarker  string          `json:"nextmarker"`
-	IsTruncated bool            `json:"istruncated"`
-	Writable    bool            `json:"writable"` // Used by client to show "upload file" button.
-	UIVersion   string          `json:"uiVersion"`
+	Objects   []WebObjectInfo `json:"objects"`
+	Writable  bool            `json:"writable"` // Used by client to show "upload file" button.
+	UIVersion string          `json:"uiVersion"`
 }
 
 // WebObjectInfo container for list objects metadata.
@@ -372,51 +437,60 @@ type WebObjectInfo struct {
 
 // ListObjects - list objects api.
 func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, reply *ListObjectsRep) error {
-	reply.UIVersion = browser.UIVersion
+	ctx := newWebContext(r, args, "WebListObjects")
+	reply.UIVersion = Version
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
-		return toJSONError(errServerNotInitialized)
+		return toJSONError(ctx, errServerNotInitialized)
 	}
 
 	listObjects := objectAPI.ListObjects
-	if web.CacheAPI() != nil {
-		listObjects = web.CacheAPI().ListObjects
-	}
 
-	if isRemoteCallRequired(context.Background(), args.BucketName, objectAPI) {
+	if isRemoteCallRequired(ctx, args.BucketName, objectAPI) {
 		sr, err := globalDNSConfig.Get(args.BucketName)
 		if err != nil {
 			if err == dns.ErrNoEntriesFound {
-				return toJSONError(BucketNotFound{
+				return toJSONError(ctx, BucketNotFound{
 					Bucket: args.BucketName,
 				}, args.BucketName)
 			}
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 		core, err := getRemoteInstanceClient(r, getHostFromSrv(sr))
 		if err != nil {
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
-		result, err := core.ListObjects(args.BucketName, args.Prefix, args.Marker, slashSeparator, 1000)
-		if err != nil {
-			return toJSONError(err, args.BucketName)
+
+		nextMarker := ""
+		// Fetch all the objects
+		for {
+			// Let listObjects reply back the maximum from server implementation
+			result, err := core.ListObjects(args.BucketName, args.Prefix, nextMarker, SlashSeparator, 1000)
+			if err != nil {
+				return toJSONError(ctx, err, args.BucketName)
+			}
+
+			for _, obj := range result.Contents {
+				reply.Objects = append(reply.Objects, WebObjectInfo{
+					Key:          obj.Key,
+					LastModified: obj.LastModified,
+					Size:         obj.Size,
+					ContentType:  obj.ContentType,
+				})
+			}
+			for _, p := range result.CommonPrefixes {
+				reply.Objects = append(reply.Objects, WebObjectInfo{
+					Key: p.Prefix,
+				})
+			}
+
+			nextMarker = result.NextMarker
+
+			// Return when there are no more objects
+			if !result.IsTruncated {
+				return nil
+			}
 		}
-		reply.NextMarker = result.NextMarker
-		reply.IsTruncated = result.IsTruncated
-		for _, obj := range result.Contents {
-			reply.Objects = append(reply.Objects, WebObjectInfo{
-				Key:          obj.Key,
-				LastModified: obj.LastModified,
-				Size:         obj.Size,
-				ContentType:  obj.ContentType,
-			})
-		}
-		for _, p := range result.CommonPrefixes {
-			reply.Objects = append(reply.Objects, WebObjectInfo{
-				Key: p.Prefix,
-			})
-		}
-		return nil
 	}
 
 	claims, owner, authErr := webRequestAuthenticate(r)
@@ -426,13 +500,13 @@ func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, r
 			r.Header.Set("prefix", args.Prefix)
 
 			// Set delimiter value for "s3:delimiter" policy conditionals.
-			r.Header.Set("delimiter", slashSeparator)
+			r.Header.Set("delimiter", SlashSeparator)
 
 			// Check if anonymous (non-owner) has access to download objects.
 			readable := globalPolicySys.IsAllowed(policy.Args{
 				Action:          policy.ListBucketAction,
 				BucketName:      args.BucketName,
-				ConditionValues: getConditionValues(r, "", ""),
+				ConditionValues: getConditionValues(r, "", "", nil),
 				IsOwner:         false,
 			})
 
@@ -440,9 +514,9 @@ func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, r
 			writable := globalPolicySys.IsAllowed(policy.Args{
 				Action:          policy.PutObjectAction,
 				BucketName:      args.BucketName,
-				ConditionValues: getConditionValues(r, "", ""),
+				ConditionValues: getConditionValues(r, "", "", nil),
 				IsOwner:         false,
-				ObjectName:      args.Prefix + "/",
+				ObjectName:      args.Prefix + SlashSeparator,
 			})
 
 			reply.Writable = writable
@@ -455,7 +529,7 @@ func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, r
 				return nil
 			}
 		} else {
-			return toJSONError(authErr)
+			return toJSONError(ctx, authErr)
 		}
 	}
 
@@ -465,23 +539,25 @@ func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, r
 		r.Header.Set("prefix", args.Prefix)
 
 		// Set delimiter value for "s3:delimiter" policy conditionals.
-		r.Header.Set("delimiter", slashSeparator)
+		r.Header.Set("delimiter", SlashSeparator)
 
 		readable := globalIAMSys.IsAllowed(iampolicy.Args{
-			AccountName:     claims.Subject,
+			AccountName:     claims.AccessKey,
 			Action:          iampolicy.ListBucketAction,
 			BucketName:      args.BucketName,
-			ConditionValues: getConditionValues(r, "", claims.Subject),
+			ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
 			IsOwner:         owner,
+			Claims:          claims.Map(),
 		})
 
 		writable := globalIAMSys.IsAllowed(iampolicy.Args{
-			AccountName:     claims.Subject,
+			AccountName:     claims.AccessKey,
 			Action:          iampolicy.PutObjectAction,
 			BucketName:      args.BucketName,
-			ConditionValues: getConditionValues(r, "", claims.Subject),
+			ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
 			IsOwner:         owner,
-			ObjectName:      args.Prefix + "/",
+			ObjectName:      args.Prefix + SlashSeparator,
+			Claims:          claims.Map(),
 		})
 
 		reply.Writable = writable
@@ -495,35 +571,49 @@ func (web *webAPIHandlers) ListObjects(r *http.Request, args *ListObjectsArgs, r
 		}
 	}
 
-	lo, err := listObjects(context.Background(), args.BucketName, args.Prefix, args.Marker, slashSeparator, 1000)
-	if err != nil {
-		return &json2.Error{Message: err.Error()}
-	}
-	for i := range lo.Objects {
-		if crypto.IsEncrypted(lo.Objects[i].UserDefined) {
-			lo.Objects[i].Size, err = lo.Objects[i].DecryptedSize()
-			if err != nil {
-				return toJSONError(err)
-			}
-		}
-	}
-	reply.NextMarker = lo.NextMarker
-	reply.IsTruncated = lo.IsTruncated
-	for _, obj := range lo.Objects {
-		reply.Objects = append(reply.Objects, WebObjectInfo{
-			Key:          obj.Name,
-			LastModified: obj.ModTime,
-			Size:         obj.Size,
-			ContentType:  obj.ContentType,
-		})
-	}
-	for _, prefix := range lo.Prefixes {
-		reply.Objects = append(reply.Objects, WebObjectInfo{
-			Key: prefix,
-		})
+	// Check if bucket is a reserved bucket name or invalid.
+	if isReservedOrInvalidBucket(args.BucketName, false) {
+		return toJSONError(ctx, errInvalidBucketName, args.BucketName)
 	}
 
-	return nil
+	nextMarker := ""
+	// Fetch all the objects
+	for {
+		// Limit browser to '1000' batches to be more responsive, scrolling friendly.
+		// Also don't change the maxKeys value silly GCS SDKs do not honor maxKeys
+		// values to be '-1'
+		lo, err := listObjects(ctx, args.BucketName, args.Prefix, nextMarker, SlashSeparator, 1000)
+		if err != nil {
+			return &json2.Error{Message: err.Error()}
+		}
+
+		nextMarker = lo.NextMarker
+		for i := range lo.Objects {
+			lo.Objects[i].Size, err = lo.Objects[i].GetActualSize()
+			if err != nil {
+				return toJSONError(ctx, err)
+			}
+		}
+
+		for _, obj := range lo.Objects {
+			reply.Objects = append(reply.Objects, WebObjectInfo{
+				Key:          obj.Name,
+				LastModified: obj.ModTime,
+				Size:         obj.Size,
+				ContentType:  obj.ContentType,
+			})
+		}
+		for _, prefix := range lo.Prefixes {
+			reply.Objects = append(reply.Objects, WebObjectInfo{
+				Key: prefix,
+			})
+		}
+
+		// Return when there are no more objects
+		if !lo.IsTruncated {
+			return nil
+		}
+	}
 }
 
 // RemoveObjectArgs - args to remove an object, JSON will look like.
@@ -543,122 +633,334 @@ type RemoveObjectArgs struct {
 
 // RemoveObject - removes an object, or all the objects at a given prefix.
 func (web *webAPIHandlers) RemoveObject(r *http.Request, args *RemoveObjectArgs, reply *WebGenericRep) error {
+	ctx := newWebContext(r, args, "WebRemoveObject")
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
-		return toJSONError(errServerNotInitialized)
+		return toJSONError(ctx, errServerNotInitialized)
 	}
-	listObjects := objectAPI.ListObjects
+
+	deleteObjects := objectAPI.DeleteObjects
 	if web.CacheAPI() != nil {
-		listObjects = web.CacheAPI().ListObjects
+		deleteObjects = web.CacheAPI().DeleteObjects
+	}
+	getObjectInfoFn := objectAPI.GetObjectInfo
+	if web.CacheAPI() != nil {
+		getObjectInfoFn = web.CacheAPI().GetObjectInfo
 	}
 
 	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		if authErr == errNoAuthToken {
+			// Check if all objects are allowed to be deleted anonymously
+			for _, object := range args.Objects {
+				if !globalPolicySys.IsAllowed(policy.Args{
+					Action:          policy.DeleteObjectAction,
+					BucketName:      args.BucketName,
+					ConditionValues: getConditionValues(r, "", "", nil),
+					IsOwner:         false,
+					ObjectName:      object,
+				}) {
+					return toJSONError(ctx, errAuthentication)
+				}
+			}
+		} else {
+			return toJSONError(ctx, authErr)
+		}
 	}
 
 	if args.BucketName == "" || len(args.Objects) == 0 {
-		return toJSONError(errInvalidArgument)
+		return toJSONError(ctx, errInvalidArgument)
 	}
 
-	reply.UIVersion = browser.UIVersion
-	if isRemoteCallRequired(context.Background(), args.BucketName, objectAPI) {
+	// Check if bucket is a reserved bucket name or invalid.
+	if isReservedOrInvalidBucket(args.BucketName, false) {
+		return toJSONError(ctx, errInvalidBucketName, args.BucketName)
+	}
+
+	reply.UIVersion = Version
+	if isRemoteCallRequired(ctx, args.BucketName, objectAPI) {
 		sr, err := globalDNSConfig.Get(args.BucketName)
 		if err != nil {
 			if err == dns.ErrNoEntriesFound {
-				return toJSONError(BucketNotFound{
+				return toJSONError(ctx, BucketNotFound{
 					Bucket: args.BucketName,
 				}, args.BucketName)
 			}
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 		core, err := getRemoteInstanceClient(r, getHostFromSrv(sr))
 		if err != nil {
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
-		objectsCh := make(chan string)
+		objectsCh := make(chan miniogo.ObjectInfo)
 
 		// Send object names that are needed to be removed to objectsCh
 		go func() {
 			defer close(objectsCh)
 
 			for _, objectName := range args.Objects {
-				objectsCh <- objectName
+				objectsCh <- miniogo.ObjectInfo{
+					Key: objectName,
+				}
 			}
 		}()
 
-		for resp := range core.RemoveObjects(args.BucketName, objectsCh) {
+		for resp := range core.RemoveObjects(ctx, args.BucketName, objectsCh, minio.RemoveObjectsOptions{}) {
 			if resp.Err != nil {
-				return toJSONError(resp.Err, args.BucketName, resp.ObjectName)
+				return toJSONError(ctx, resp.Err, args.BucketName, resp.ObjectName)
 			}
 		}
 		return nil
 	}
 
-	var err error
+	opts := ObjectOptions{
+		Versioned:        globalBucketVersioningSys.Enabled(args.BucketName),
+		VersionSuspended: globalBucketVersioningSys.Suspended(args.BucketName),
+	}
+	var (
+		err           error
+		replicateSync bool
+	)
+
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.GetAccessKey()
+	sourceIP := handlers.GetSourceIP(r)
+
 next:
 	for _, objectName := range args.Objects {
 		// If not a directory, remove the object.
-		if !hasSuffix(objectName, slashSeparator) && objectName != "" {
-			// Deny if WORM is enabled
-			if globalWORMEnabled {
-				if _, err = objectAPI.GetObjectInfo(context.Background(), args.BucketName, objectName, ObjectOptions{}); err == nil {
-					return toJSONError(errMethodNotAllowed)
+		if !HasSuffix(objectName, SlashSeparator) && objectName != "" {
+			// Check permissions for non-anonymous user.
+			if authErr != errNoAuthToken {
+				if !globalIAMSys.IsAllowed(iampolicy.Args{
+					AccountName:     claims.AccessKey,
+					Action:          iampolicy.DeleteObjectAction,
+					BucketName:      args.BucketName,
+					ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+					IsOwner:         owner,
+					ObjectName:      objectName,
+					Claims:          claims.Map(),
+				}) {
+					return toJSONError(ctx, errAccessDenied)
 				}
 			}
 
-			if !globalIAMSys.IsAllowed(iampolicy.Args{
-				AccountName:     claims.Subject,
-				Action:          iampolicy.DeleteObjectAction,
-				BucketName:      args.BucketName,
-				ConditionValues: getConditionValues(r, "", claims.Subject),
-				IsOwner:         owner,
-				ObjectName:      objectName,
-			}) {
-				return toJSONError(errAccessDenied)
+			if authErr == errNoAuthToken {
+				// Check if object is allowed to be deleted anonymously.
+				if !globalPolicySys.IsAllowed(policy.Args{
+					Action:          policy.DeleteObjectAction,
+					BucketName:      args.BucketName,
+					ConditionValues: getConditionValues(r, "", "", nil),
+					IsOwner:         false,
+					ObjectName:      objectName,
+				}) {
+					return toJSONError(ctx, errAccessDenied)
+				}
+			}
+			var (
+				replicateDel, hasLifecycleConfig bool
+				goi                              ObjectInfo
+				gerr                             error
+			)
+			if _, err := globalBucketMetadataSys.GetLifecycleConfig(args.BucketName); err == nil {
+				hasLifecycleConfig = true
+			}
+			os := newObjSweeper(args.BucketName, objectName)
+			opts = os.GetOpts()
+			if hasReplicationRules(ctx, args.BucketName, []ObjectToDelete{{ObjectName: objectName}}) || hasLifecycleConfig {
+				goi, gerr = getObjectInfoFn(ctx, args.BucketName, objectName, opts)
+				if gerr == nil {
+					os.SetTransitionState(goi)
+				}
+				if replicateDel, replicateSync = checkReplicateDelete(ctx, args.BucketName, ObjectToDelete{
+					ObjectName: objectName,
+					VersionID:  goi.VersionID,
+				}, goi, gerr); replicateDel {
+					opts.DeleteMarkerReplicationStatus = string(replication.Pending)
+					opts.DeleteMarker = true
+				}
 			}
 
-			if err = deleteObject(context.Background(), objectAPI, web.CacheAPI(), args.BucketName, objectName, r); err != nil {
-				break next
+			deleteObject := objectAPI.DeleteObject
+			if web.CacheAPI() != nil {
+				deleteObject = web.CacheAPI().DeleteObject
 			}
+
+			oi, err := deleteObject(ctx, args.BucketName, objectName, opts)
+			if err != nil {
+				switch err.(type) {
+				case BucketNotFound:
+					return toJSONError(ctx, err)
+				}
+			}
+			if oi.Name == "" {
+				logger.LogIf(ctx, err)
+				continue
+			}
+
+			eventName := event.ObjectRemovedDelete
+			if oi.DeleteMarker {
+				eventName = event.ObjectRemovedDeleteMarkerCreated
+			}
+
+			// Notify object deleted event.
+			sendEvent(eventArgs{
+				EventName:  eventName,
+				BucketName: args.BucketName,
+				Object:     oi,
+				ReqParams:  reqParams,
+				UserAgent:  r.UserAgent(),
+				Host:       sourceIP,
+			})
+
+			if replicateDel {
+				dobj := DeletedObjectVersionInfo{
+					DeletedObject: DeletedObject{
+						ObjectName:                    objectName,
+						DeleteMarkerVersionID:         oi.VersionID,
+						DeleteMarkerReplicationStatus: string(oi.ReplicationStatus),
+						DeleteMarkerMTime:             DeleteMarkerMTime{oi.ModTime},
+						DeleteMarker:                  oi.DeleteMarker,
+						VersionPurgeStatus:            oi.VersionPurgeStatus,
+					},
+					Bucket: args.BucketName,
+				}
+				scheduleReplicationDelete(ctx, dobj, objectAPI, replicateSync)
+			}
+
+			logger.LogIf(ctx, err)
+			logger.LogIf(ctx, os.Sweep())
 			continue
 		}
 
-		if !globalIAMSys.IsAllowed(iampolicy.Args{
-			AccountName:     claims.Subject,
-			Action:          iampolicy.DeleteObjectAction,
-			BucketName:      args.BucketName,
-			ConditionValues: getConditionValues(r, "", claims.Subject),
-			IsOwner:         owner,
-			ObjectName:      objectName,
-		}) {
-			return toJSONError(errAccessDenied)
+		if authErr == errNoAuthToken {
+			// Check if object is allowed to be deleted anonymously
+			if !globalPolicySys.IsAllowed(policy.Args{
+				Action:          iampolicy.DeleteObjectAction,
+				BucketName:      args.BucketName,
+				ConditionValues: getConditionValues(r, "", "", nil),
+				IsOwner:         false,
+				ObjectName:      objectName,
+			}) {
+				return toJSONError(ctx, errAccessDenied)
+			}
+		} else {
+			if !globalIAMSys.IsAllowed(iampolicy.Args{
+				AccountName:     claims.AccessKey,
+				Action:          iampolicy.DeleteObjectAction,
+				BucketName:      args.BucketName,
+				ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+				IsOwner:         owner,
+				ObjectName:      objectName,
+				Claims:          claims.Map(),
+			}) {
+				return toJSONError(ctx, errAccessDenied)
+			}
 		}
 
-		// For directories, list the contents recursively and remove.
-		marker := ""
+		// Allocate new results channel to receive ObjectInfo.
+		objInfoCh := make(chan ObjectInfo)
+
+		// Walk through all objects
+		if err = objectAPI.Walk(ctx, args.BucketName, objectName, objInfoCh, ObjectOptions{}); err != nil {
+			break next
+		}
+
 		for {
-			var lo ListObjectsInfo
-			lo, err = listObjects(context.Background(), args.BucketName, objectName, marker, "", 1000)
-			if err != nil {
+			var objects []ObjectToDelete
+			for obj := range objInfoCh {
+				if len(objects) == maxDeleteList {
+					// Reached maximum delete requests, attempt a delete for now.
+					break
+				}
+				if obj.ReplicationStatus == replication.Replica {
+					if authErr == errNoAuthToken {
+						// Check if object is allowed to be deleted anonymously
+						if !globalPolicySys.IsAllowed(policy.Args{
+							Action:          iampolicy.ReplicateDeleteAction,
+							BucketName:      args.BucketName,
+							ConditionValues: getConditionValues(r, "", "", nil),
+							IsOwner:         false,
+							ObjectName:      objectName,
+						}) {
+							return toJSONError(ctx, errAccessDenied)
+						}
+					} else {
+						if !globalIAMSys.IsAllowed(iampolicy.Args{
+							AccountName:     claims.AccessKey,
+							Action:          iampolicy.ReplicateDeleteAction,
+							BucketName:      args.BucketName,
+							ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+							IsOwner:         owner,
+							ObjectName:      objectName,
+							Claims:          claims.Map(),
+						}) {
+							return toJSONError(ctx, errAccessDenied)
+						}
+					}
+				}
+				replicateDel, _ := checkReplicateDelete(ctx, args.BucketName, ObjectToDelete{ObjectName: obj.Name, VersionID: obj.VersionID}, obj, nil)
+				// since versioned delete is not available on web browser, yet - this is a simple DeleteMarker replication
+				objToDel := ObjectToDelete{ObjectName: obj.Name}
+				if replicateDel {
+					objToDel.DeleteMarkerReplicationStatus = string(replication.Pending)
+				}
+
+				objects = append(objects, objToDel)
+			}
+
+			// Nothing to do.
+			if len(objects) == 0 {
 				break next
 			}
-			marker = lo.NextMarker
-			for _, obj := range lo.Objects {
-				err = deleteObject(context.Background(), objectAPI, web.CacheAPI(), args.BucketName, obj.Name, r)
+
+			// Deletes a list of objects.
+			deletedObjects, errs := deleteObjects(ctx, args.BucketName, objects, opts)
+			for i, err := range errs {
+				if err != nil && !isErrObjectNotFound(err) {
+					deletedObjects[i].DeleteMarkerReplicationStatus = objects[i].DeleteMarkerReplicationStatus
+					deletedObjects[i].VersionPurgeStatus = objects[i].VersionPurgeStatus
+				}
 				if err != nil {
+					logger.LogIf(ctx, err)
 					break next
 				}
 			}
-			if !lo.IsTruncated {
-				break
+			// Notify deleted event for objects.
+			for _, dobj := range deletedObjects {
+				objInfo := ObjectInfo{
+					Name:      dobj.ObjectName,
+					VersionID: dobj.VersionID,
+				}
+				if dobj.DeleteMarker {
+					objInfo = ObjectInfo{
+						Name:         dobj.ObjectName,
+						DeleteMarker: dobj.DeleteMarker,
+						VersionID:    dobj.DeleteMarkerVersionID,
+					}
+				}
+				sendEvent(eventArgs{
+					EventName:  event.ObjectRemovedDelete,
+					BucketName: args.BucketName,
+					Object:     objInfo,
+					ReqParams:  reqParams,
+					UserAgent:  r.UserAgent(),
+					Host:       sourceIP,
+				})
+				if dobj.DeleteMarkerReplicationStatus == string(replication.Pending) || dobj.VersionPurgeStatus == Pending {
+					dv := DeletedObjectVersionInfo{
+						DeletedObject: dobj,
+						Bucket:        args.BucketName,
+					}
+					scheduleReplicationDelete(ctx, dv, objectAPI, replicateSync)
+				}
 			}
 		}
 	}
 
-	if err != nil && !isErrObjectNotFound(err) {
+	if err != nil && !isErrObjectNotFound(err) && !isErrVersionNotFound(err) {
 		// Ignore object not found error.
-		return toJSONError(err, args.BucketName, "")
+		return toJSONError(ctx, err, args.BucketName, "")
 	}
 
 	return nil
@@ -678,45 +980,23 @@ type LoginRep struct {
 
 // Login - user login handler.
 func (web *webAPIHandlers) Login(r *http.Request, args *LoginArgs, reply *LoginRep) error {
+	ctx := newWebContext(r, args, "WebLogin")
 	token, err := authenticateWeb(args.Username, args.Password)
 	if err != nil {
-		return toJSONError(err)
+		return toJSONError(ctx, err)
 	}
 
 	reply.Token = token
-	reply.UIVersion = browser.UIVersion
-	return nil
-}
-
-// GenerateAuthReply - reply for GenerateAuth
-type GenerateAuthReply struct {
-	AccessKey string `json:"accessKey"`
-	SecretKey string `json:"secretKey"`
-	UIVersion string `json:"uiVersion"`
-}
-
-func (web webAPIHandlers) GenerateAuth(r *http.Request, args *WebGenericArgs, reply *GenerateAuthReply) error {
-	_, owner, authErr := webRequestAuthenticate(r)
-	if authErr != nil {
-		return toJSONError(authErr)
-	}
-	if !owner {
-		return toJSONError(errAccessDenied)
-	}
-	cred, err := auth.GetNewCredentials()
-	if err != nil {
-		return toJSONError(err)
-	}
-	reply.AccessKey = cred.AccessKey
-	reply.SecretKey = cred.SecretKey
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	return nil
 }
 
 // SetAuthArgs - argument for SetAuth
 type SetAuthArgs struct {
-	AccessKey string `json:"accessKey"`
-	SecretKey string `json:"secretKey"`
+	CurrentAccessKey string `json:"currentAccessKey"`
+	CurrentSecretKey string `json:"currentSecretKey"`
+	NewAccessKey     string `json:"newAccessKey"`
+	NewSecretKey     string `json:"newSecretKey"`
 }
 
 // SetAuthReply - reply for SetAuth
@@ -728,74 +1008,57 @@ type SetAuthReply struct {
 
 // SetAuth - Set accessKey and secretKey credentials.
 func (web *webAPIHandlers) SetAuth(r *http.Request, args *SetAuthArgs, reply *SetAuthReply) error {
-	_, owner, authErr := webRequestAuthenticate(r)
+	ctx := newWebContext(r, args, "WebSetAuth")
+	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
 
-	// If creds are set through ENV disallow changing credentials.
-	if globalIsEnvCreds || globalWORMEnabled || !owner || globalEtcdClient != nil {
-		return toJSONError(errChangeCredNotAllowed)
+	if owner {
+		// Owner is not allowed to change credentials through browser.
+		return toJSONError(ctx, errChangeCredNotAllowed)
 	}
 
-	creds, err := auth.CreateCredentials(args.AccessKey, args.SecretKey)
+	if !globalIAMSys.IsAllowed(iampolicy.Args{
+		AccountName:     claims.AccessKey,
+		Action:          iampolicy.CreateUserAdminAction,
+		IsOwner:         false,
+		ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+		Claims:          claims.Map(),
+		DenyOnly:        true,
+	}) {
+		return toJSONError(ctx, errChangeCredNotAllowed)
+	}
+
+	// for IAM users, access key cannot be updated
+	// claims.AccessKey is used instead of accesskey from args
+	prevCred, ok := globalIAMSys.GetUser(claims.AccessKey)
+	if !ok {
+		return errInvalidAccessKeyID
+	}
+
+	// Throw error when wrong secret key is provided
+	if subtle.ConstantTimeCompare([]byte(prevCred.SecretKey), []byte(args.CurrentSecretKey)) != 1 {
+		return errIncorrectCreds
+	}
+
+	creds, err := auth.CreateCredentials(claims.AccessKey, args.NewSecretKey)
 	if err != nil {
-		return toJSONError(err)
+		return toJSONError(ctx, err)
 	}
 
-	// Acquire lock before updating global configuration.
-	globalServerConfigMu.Lock()
-	defer globalServerConfigMu.Unlock()
-
-	// Update credentials in memory
-	prevCred := globalServerConfig.SetCredential(creds)
-
-	// Persist updated credentials.
-	if err = saveServerConfig(context.Background(), newObjectLayerFn(), globalServerConfig); err != nil {
-		// Save the current creds when failed to update.
-		globalServerConfig.SetCredential(prevCred)
-		logger.LogIf(context.Background(), err)
-		return toJSONError(err)
+	err = globalIAMSys.SetUserSecretKey(creds.AccessKey, creds.SecretKey)
+	if err != nil {
+		return toJSONError(ctx, err)
 	}
 
-	if errs := globalNotificationSys.LoadCredentials(); len(errs) != 0 {
-		reply.PeerErrMsgs = make(map[string]string)
-		for _, nerr := range errs {
-			err = fmt.Errorf("Unable to update credentials on server %v: %v", nerr.Host, nerr.Err)
-			logger.LogIf(context.Background(), err)
-			reply.PeerErrMsgs[nerr.Host.String()] = err.Error()
-		}
-	} else {
-		reply.Token, err = authenticateWeb(creds.AccessKey, creds.SecretKey)
-		if err != nil {
-			return toJSONError(err)
-		}
-		reply.UIVersion = browser.UIVersion
+	reply.Token, err = authenticateWeb(creds.AccessKey, creds.SecretKey)
+	if err != nil {
+		return toJSONError(ctx, err)
 	}
 
-	return nil
-}
+	reply.UIVersion = Version
 
-// GetAuthReply - Reply current credentials.
-type GetAuthReply struct {
-	AccessKey string `json:"accessKey"`
-	SecretKey string `json:"secretKey"`
-	UIVersion string `json:"uiVersion"`
-}
-
-// GetAuth - return accessKey and secretKey credentials.
-func (web *webAPIHandlers) GetAuth(r *http.Request, args *WebGenericArgs, reply *GetAuthReply) error {
-	_, owner, authErr := webRequestAuthenticate(r)
-	if authErr != nil {
-		return toJSONError(authErr)
-	}
-	if !owner {
-		return toJSONError(errAccessDenied)
-	}
-	creds := globalServerConfig.GetCredential()
-	reply.AccessKey = creds.AccessKey
-	reply.SecretKey = creds.SecretKey
-	reply.UIVersion = browser.UIVersion
 	return nil
 }
 
@@ -807,27 +1070,33 @@ type URLTokenReply struct {
 
 // CreateURLToken creates a URL token (short-lived) for GET requests.
 func (web *webAPIHandlers) CreateURLToken(r *http.Request, args *WebGenericArgs, reply *URLTokenReply) error {
+	ctx := newWebContext(r, args, "WebCreateURLToken")
 	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
 
-	creds := globalServerConfig.GetCredential()
+	creds := globalActiveCred
 	if !owner {
 		var ok bool
-		creds, ok = globalIAMSys.GetUser(claims.Subject)
+		creds, ok = globalIAMSys.GetUser(claims.AccessKey)
 		if !ok {
-			return toJSONError(errInvalidAccessKeyID)
+			return toJSONError(ctx, errInvalidAccessKeyID)
 		}
 	}
 
-	token, err := authenticateURL(creds.AccessKey, creds.SecretKey)
-	if err != nil {
-		return toJSONError(err)
+	if creds.SessionToken != "" {
+		// Use the same session token for URL token.
+		reply.Token = creds.SessionToken
+	} else {
+		token, err := authenticateURL(creds.AccessKey, creds.SecretKey)
+		if err != nil {
+			return toJSONError(ctx, err)
+		}
+		reply.Token = token
 	}
 
-	reply.Token = token
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	return nil
 }
 
@@ -835,25 +1104,35 @@ func (web *webAPIHandlers) CreateURLToken(r *http.Request, args *WebGenericArgs,
 func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "WebUpload")
 
-	defer logger.AuditLog(w, r, "WebUpload", mustGetClaimsFromToken(r))
+	// obtain the claims here if possible, for audit logging.
+	claims, owner, authErr := webRequestAuthenticate(r)
+
+	defer logger.AuditLog(ctx, w, r, claims.Map())
 
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
 		writeWebErrorResponse(w, errServerNotInitialized)
 		return
 	}
+
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
-	object := vars["object"]
+	object, err := unescapePath(vars["object"])
+	if err != nil {
+		writeWebErrorResponse(w, err)
+		return
+	}
 
-	claims, owner, authErr := webRequestAuthenticate(r)
+	retPerms := ErrAccessDenied
+	holdPerms := ErrAccessDenied
+	replPerms := ErrAccessDenied
 	if authErr != nil {
 		if authErr == errNoAuthToken {
 			// Check if anonymous (non-owner) has access to upload objects.
 			if !globalPolicySys.IsAllowed(policy.Args{
 				Action:          policy.PutObjectAction,
 				BucketName:      bucket,
-				ConditionValues: getConditionValues(r, "", ""),
+				ConditionValues: getConditionValues(r, "", "", nil),
 				IsOwner:         false,
 				ObjectName:      object,
 			}) {
@@ -869,19 +1148,62 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 	// For authenticated users apply IAM policy.
 	if authErr == nil {
 		if !globalIAMSys.IsAllowed(iampolicy.Args{
-			AccountName:     claims.Subject,
+			AccountName:     claims.AccessKey,
 			Action:          iampolicy.PutObjectAction,
 			BucketName:      bucket,
-			ConditionValues: getConditionValues(r, "", claims.Subject),
+			ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
 			IsOwner:         owner,
 			ObjectName:      object,
+			Claims:          claims.Map(),
 		}) {
 			writeWebErrorResponse(w, errAuthentication)
 			return
 		}
+		if globalIAMSys.IsAllowed(iampolicy.Args{
+			AccountName:     claims.AccessKey,
+			Action:          iampolicy.PutObjectRetentionAction,
+			BucketName:      bucket,
+			ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+			IsOwner:         owner,
+			ObjectName:      object,
+			Claims:          claims.Map(),
+		}) {
+			retPerms = ErrNone
+		}
+		if globalIAMSys.IsAllowed(iampolicy.Args{
+			AccountName:     claims.AccessKey,
+			Action:          iampolicy.PutObjectLegalHoldAction,
+			BucketName:      bucket,
+			ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+			IsOwner:         owner,
+			ObjectName:      object,
+			Claims:          claims.Map(),
+		}) {
+			holdPerms = ErrNone
+		}
+		if globalIAMSys.IsAllowed(iampolicy.Args{
+			AccountName:     claims.AccessKey,
+			Action:          iampolicy.GetReplicationConfigurationAction,
+			BucketName:      bucket,
+			ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+			IsOwner:         owner,
+			ObjectName:      "",
+			Claims:          claims.Map(),
+		}) {
+			replPerms = ErrNone
+		}
 	}
-	if globalAutoEncryption && !crypto.SSEC.IsRequested(r.Header) {
-		r.Header.Add(crypto.SSEHeader, crypto.SSEAlgorithmAES256)
+
+	// Check if bucket is a reserved bucket name or invalid.
+	if isReservedOrInvalidBucket(bucket, false) {
+		writeWebErrorResponse(w, errInvalidBucketName)
+		return
+	}
+
+	// Check if bucket encryption is enabled
+	_, err = globalBucketSSEConfigSys.Get(bucket)
+	if (globalAutoEncryption || err == nil) && !crypto.SSEC.IsRequested(r.Header) {
+		r.Header.Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
 	}
 
 	// Require Content-Length to be set in the request
@@ -891,8 +1213,13 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := enforceBucketQuota(ctx, bucket, size); err != nil {
+		writeWebErrorResponse(w, err)
+		return
+	}
+
 	// Extract incoming metadata if any.
-	metadata, err := extractMetadata(context.Background(), r)
+	metadata, err := extractMetadata(ctx, r)
 	if err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 		return
@@ -907,112 +1234,127 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 		writeWebErrorResponse(w, err)
 		return
 	}
+
 	if objectAPI.IsCompressionSupported() && isCompressible(r.Header, object) && size > 0 {
 		// Storing the compression metadata.
-		metadata[ReservedMetadataPrefix+"compression"] = compressionAlgorithmV1
-		metadata[ReservedMetadataPrefix+"actual-size"] = strconv.FormatInt(size, 10)
+		metadata[ReservedMetadataPrefix+"compression"] = compressionAlgorithmV2
+		metadata[ReservedMetadataPrefix+"actual-size"] = strconv.FormatInt(actualSize, 10)
 
-		pipeReader, pipeWriter := io.Pipe()
-		snappyWriter := snappy.NewBufferedWriter(pipeWriter)
-
-		var actualReader *hash.Reader
-		actualReader, err = hash.NewReader(reader, size, "", "", actualSize)
+		actualReader, err := hash.NewReader(reader, actualSize, "", "", actualSize)
 		if err != nil {
 			writeWebErrorResponse(w, err)
 			return
 		}
 
-		go func() {
-			// Writing to the compressed writer.
-			_, cerr := io.CopyN(snappyWriter, actualReader, actualSize)
-			snappyWriter.Close()
-			pipeWriter.CloseWithError(cerr)
-		}()
-
 		// Set compression metrics.
 		size = -1 // Since compressed size is un-predictable.
-		reader = pipeReader
+		s2c := newS2CompressReader(actualReader, actualSize)
+		defer s2c.Close()
+		reader = etag.Wrap(s2c, actualReader)
 		hashReader, err = hash.NewReader(reader, size, "", "", actualSize)
 		if err != nil {
 			writeWebErrorResponse(w, err)
 			return
 		}
 	}
-	pReader = NewPutObjReader(hashReader, nil, nil)
+
+	mustReplicate, sync := mustReplicateWeb(ctx, r, bucket, object, metadata, "", replPerms)
+	if mustReplicate {
+		metadata[xhttp.AmzBucketReplicationStatus] = string(replication.Pending)
+	}
+	pReader = NewPutObjReader(hashReader)
 	// get gateway encryption options
-	var opts ObjectOptions
-	opts, err = putOpts(ctx, r, bucket, object, metadata)
+	opts, err := putOpts(ctx, r, bucket, object, metadata)
 	if err != nil {
 		writeErrorResponseHeadersOnly(w, toAPIError(ctx, err))
 		return
 	}
+
 	if objectAPI.IsEncryptionSupported() {
-		if hasServerSideEncryptionHeader(r.Header) && !hasSuffix(object, slashSeparator) { // handle SSE requests
-			rawReader := hashReader
-			var objectEncryptionKey []byte
-			reader, objectEncryptionKey, err = EncryptRequest(hashReader, r, bucket, object, metadata)
+		if _, ok := crypto.IsRequested(r.Header); ok && !HasSuffix(object, SlashSeparator) { // handle SSE requests
+			var (
+				objectEncryptionKey crypto.ObjectKey
+				encReader           io.Reader
+			)
+			encReader, objectEncryptionKey, err = EncryptRequest(hashReader, r, bucket, object, metadata)
 			if err != nil {
 				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 				return
 			}
 			info := ObjectInfo{Size: size}
-			hashReader, err = hash.NewReader(reader, info.EncryptedSize(), "", "", size) // do not try to verify encrypted content
+			// do not try to verify encrypted content
+			hashReader, err = hash.NewReader(etag.Wrap(encReader, hashReader), info.EncryptedSize(), "", "", size)
 			if err != nil {
 				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
 				return
 			}
-			pReader = NewPutObjReader(rawReader, hashReader, objectEncryptionKey)
+			pReader, err = pReader.WithEncryption(hashReader, &objectEncryptionKey)
+			if err != nil {
+				writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL, guessIsBrowserReq(r))
+				return
+			}
 		}
 	}
 
 	// Ensure that metadata does not contain sensitive information
 	crypto.RemoveSensitiveEntries(metadata)
 
-	// Deny if WORM is enabled
-	if globalWORMEnabled {
-		if _, err = objectAPI.GetObjectInfo(ctx, bucket, object, opts); err == nil {
-			writeWebErrorResponse(w, errMethodNotAllowed)
-			return
-		}
+	putObject := objectAPI.PutObject
+	getObjectInfo := objectAPI.GetObjectInfo
+	if web.CacheAPI() != nil {
+		putObject = web.CacheAPI().PutObject
+		getObjectInfo = web.CacheAPI().GetObjectInfo
 	}
 
-	putObject := objectAPI.PutObject
-	if !hasServerSideEncryptionHeader(r.Header) && web.CacheAPI() != nil {
-		putObject = web.CacheAPI().PutObject
+	// enforce object retention rules
+	retentionMode, retentionDate, _, s3Err := checkPutObjectLockAllowed(ctx, r, bucket, object, getObjectInfo, retPerms, holdPerms)
+	if s3Err != ErrNone {
+		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL, guessIsBrowserReq(r))
+		return
 	}
-	objInfo, err := putObject(context.Background(), bucket, object, pReader, opts)
+	if retentionMode != "" {
+		opts.UserDefined[strings.ToLower(xhttp.AmzObjectLockMode)] = string(retentionMode)
+		opts.UserDefined[strings.ToLower(xhttp.AmzObjectLockRetainUntilDate)] = retentionDate.UTC().Format(iso8601TimeFormat)
+	}
+
+	os := newObjSweeper(bucket, object)
+	// Get appropriate object info to identify the remote object to delete
+	goiOpts := os.GetOpts()
+	if goi, gerr := getObjectInfo(ctx, bucket, object, goiOpts); gerr == nil {
+		os.SetTransitionState(goi)
+	}
+
+	objInfo, err := putObject(GlobalContext, bucket, object, pReader, opts)
 	if err != nil {
 		writeWebErrorResponse(w, err)
 		return
 	}
 	if objectAPI.IsEncryptionSupported() {
-		if crypto.IsEncrypted(objInfo.UserDefined) {
-			switch {
-			case crypto.S3.IsEncrypted(objInfo.UserDefined):
-				w.Header().Set(crypto.SSEHeader, crypto.SSEAlgorithmAES256)
-			case crypto.SSEC.IsRequested(r.Header):
-				w.Header().Set(crypto.SSECAlgorithm, r.Header.Get(crypto.SSECAlgorithm))
-				w.Header().Set(crypto.SSECKeyMD5, r.Header.Get(crypto.SSECKeyMD5))
-			}
+		switch kind, _ := crypto.IsEncrypted(objInfo.UserDefined); kind {
+		case crypto.S3:
+			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
+		case crypto.SSEC:
+			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerAlgorithm, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerAlgorithm))
+			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerKeyMD5, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerKeyMD5))
 		}
 	}
-
-	// Get host and port from Request.RemoteAddr.
-	host, port, err := net.SplitHostPort(handlers.GetSourceIP(r))
-	if err != nil {
-		host, port = "", ""
+	if mustReplicate {
+		scheduleReplication(ctx, objInfo.Clone(), objectAPI, sync, replication.ObjectReplicationType)
 	}
+	logger.LogIf(ctx, os.Sweep())
+
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.GetAccessKey()
 
 	// Notify object created event.
 	sendEvent(eventArgs{
 		EventName:    event.ObjectCreatedPut,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    reqParams,
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
-		Host:         host,
-		Port:         port,
+		Host:         handlers.GetSourceIP(r),
 	})
 }
 
@@ -1020,7 +1362,8 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "WebDownload")
 
-	defer logger.AuditLog(w, r, "WebDownload", mustGetClaimsFromToken(r))
+	claims, owner, authErr := webTokenAuthenticate(r.URL.Query().Get("token"))
+	defer logger.AuditLog(ctx, w, r, claims.Map())
 
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
@@ -1029,23 +1372,47 @@ func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 	}
 
 	vars := mux.Vars(r)
-	bucket := vars["bucket"]
-	object := vars["object"]
-	token := r.URL.Query().Get("token")
 
-	claims, owner, authErr := webTokenAuthenticate(token)
+	bucket := vars["bucket"]
+	object, err := unescapePath(vars["object"])
+	if err != nil {
+		writeWebErrorResponse(w, err)
+		return
+	}
+
+	getRetPerms := ErrAccessDenied
+	legalHoldPerms := ErrAccessDenied
+
 	if authErr != nil {
 		if authErr == errNoAuthToken {
 			// Check if anonymous (non-owner) has access to download objects.
 			if !globalPolicySys.IsAllowed(policy.Args{
 				Action:          policy.GetObjectAction,
 				BucketName:      bucket,
-				ConditionValues: getConditionValues(r, "", ""),
+				ConditionValues: getConditionValues(r, "", "", nil),
 				IsOwner:         false,
 				ObjectName:      object,
 			}) {
 				writeWebErrorResponse(w, errAuthentication)
 				return
+			}
+			if globalPolicySys.IsAllowed(policy.Args{
+				Action:          policy.GetObjectRetentionAction,
+				BucketName:      bucket,
+				ConditionValues: getConditionValues(r, "", "", nil),
+				IsOwner:         false,
+				ObjectName:      object,
+			}) {
+				getRetPerms = ErrNone
+			}
+			if globalPolicySys.IsAllowed(policy.Args{
+				Action:          policy.GetObjectLegalHoldAction,
+				BucketName:      bucket,
+				ConditionValues: getConditionValues(r, "", "", nil),
+				IsOwner:         false,
+				ObjectName:      object,
+			}) {
+				legalHoldPerms = ErrNone
 			}
 		} else {
 			writeWebErrorResponse(w, authErr)
@@ -1056,16 +1423,45 @@ func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 	// For authenticated users apply IAM policy.
 	if authErr == nil {
 		if !globalIAMSys.IsAllowed(iampolicy.Args{
-			AccountName:     claims.Subject,
+			AccountName:     claims.AccessKey,
 			Action:          iampolicy.GetObjectAction,
 			BucketName:      bucket,
-			ConditionValues: getConditionValues(r, "", claims.Subject),
+			ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
 			IsOwner:         owner,
 			ObjectName:      object,
+			Claims:          claims.Map(),
 		}) {
 			writeWebErrorResponse(w, errAuthentication)
 			return
 		}
+		if globalIAMSys.IsAllowed(iampolicy.Args{
+			AccountName:     claims.AccessKey,
+			Action:          iampolicy.GetObjectRetentionAction,
+			BucketName:      bucket,
+			ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+			IsOwner:         owner,
+			ObjectName:      object,
+			Claims:          claims.Map(),
+		}) {
+			getRetPerms = ErrNone
+		}
+		if globalIAMSys.IsAllowed(iampolicy.Args{
+			AccountName:     claims.AccessKey,
+			Action:          iampolicy.GetObjectLegalHoldAction,
+			BucketName:      bucket,
+			ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+			IsOwner:         owner,
+			ObjectName:      object,
+			Claims:          claims.Map(),
+		}) {
+			legalHoldPerms = ErrNone
+		}
+	}
+
+	// Check if bucket is a reserved bucket name or invalid.
+	if isReservedOrInvalidBucket(bucket, false) {
+		writeWebErrorResponse(w, errInvalidBucketName)
+		return
 	}
 
 	getObjectNInfo := objectAPI.GetObjectNInfo
@@ -1083,8 +1479,11 @@ func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 
 	objInfo := gr.ObjInfo
 
+	// filter object lock metadata if permission does not permit
+	objInfo.UserDefined = objectlock.FilterObjectLockMetadata(objInfo.UserDefined, getRetPerms != ErrNone, legalHoldPerms != ErrNone)
+
 	if objectAPI.IsEncryptionSupported() {
-		if _, err = DecryptObjectInfo(&objInfo, r.Header); err != nil {
+		if _, err = DecryptObjectInfo(&objInfo, r); err != nil {
 			writeWebErrorResponse(w, err)
 			return
 		}
@@ -1092,24 +1491,27 @@ func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 
 	// Set encryption response headers
 	if objectAPI.IsEncryptionSupported() {
-		if crypto.IsEncrypted(objInfo.UserDefined) {
-			switch {
-			case crypto.S3.IsEncrypted(objInfo.UserDefined):
-				w.Header().Set(crypto.SSEHeader, crypto.SSEAlgorithmAES256)
-			case crypto.SSEC.IsEncrypted(objInfo.UserDefined):
-				w.Header().Set(crypto.SSECAlgorithm, r.Header.Get(crypto.SSECAlgorithm))
-				w.Header().Set(crypto.SSECKeyMD5, r.Header.Get(crypto.SSECKeyMD5))
-			}
+		switch kind, _ := crypto.IsEncrypted(objInfo.UserDefined); kind {
+		case crypto.S3:
+			w.Header().Set(xhttp.AmzServerSideEncryption, xhttp.AmzEncryptionAES)
+		case crypto.SSEC:
+			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerAlgorithm, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerAlgorithm))
+			w.Header().Set(xhttp.AmzServerSideEncryptionCustomerKeyMD5, r.Header.Get(xhttp.AmzServerSideEncryptionCustomerKeyMD5))
 		}
 	}
 
-	if err = setObjectHeaders(w, objInfo, nil); err != nil {
+	// Set Parts Count Header
+	if opts.PartNumber > 0 && len(objInfo.Parts) > 0 {
+		setPartsCountHeaders(w, objInfo)
+	}
+
+	if err = setObjectHeaders(w, objInfo, nil, opts); err != nil {
 		writeWebErrorResponse(w, err)
 		return
 	}
 
 	// Add content disposition.
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", path.Base(objInfo.Name)))
+	w.Header().Set(xhttp.ContentDisposition, fmt.Sprintf("attachment; filename=\"%s\"", path.Base(objInfo.Name)))
 
 	setHeadGetRespHeaders(w, r.URL.Query())
 
@@ -1130,22 +1532,18 @@ func (web *webAPIHandlers) Download(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get host and port from Request.RemoteAddr.
-	host, port, err := net.SplitHostPort(handlers.GetSourceIP(r))
-	if err != nil {
-		host, port = "", ""
-	}
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.GetAccessKey()
 
 	// Notify object accessed via a GET request.
 	sendEvent(eventArgs{
 		EventName:    event.ObjectAccessedGet,
 		BucketName:   bucket,
 		Object:       objInfo,
-		ReqParams:    extractReqParams(r),
+		ReqParams:    reqParams,
 		RespElements: extractRespElements(w),
 		UserAgent:    r.UserAgent(),
-		Host:         host,
-		Port:         port,
+		Host:         handlers.GetSourceIP(r),
 	})
 }
 
@@ -1160,16 +1558,13 @@ type DownloadZipArgs struct {
 
 // Takes a list of objects and creates a zip file that sent as the response body.
 func (web *webAPIHandlers) DownloadZip(w http.ResponseWriter, r *http.Request) {
-	// Get host and port from Request.RemoteAddr.
-	host, port, err := net.SplitHostPort(handlers.GetSourceIP(r))
-	if err != nil {
-		host, port = "", ""
-	}
+	host := handlers.GetSourceIP(r)
+
+	claims, owner, authErr := webTokenAuthenticate(r.URL.Query().Get("token"))
 
 	ctx := newContext(r, w, "WebDownloadZip")
-	defer logger.AuditLog(w, r, "WebDownloadZip", mustGetClaimsFromToken(r))
+	defer logger.AuditLog(ctx, w, r, claims.Map())
 
-	var wg sync.WaitGroup
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
 		writeWebErrorResponse(w, errServerNotInitialized)
@@ -1186,8 +1581,9 @@ func (web *webAPIHandlers) DownloadZip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := r.URL.Query().Get("token")
-	claims, owner, authErr := webTokenAuthenticate(token)
+	var getRetPerms []APIErrorCode
+	var legalHoldPerms []APIErrorCode
+
 	if authErr != nil {
 		if authErr == errNoAuthToken {
 			for _, object := range args.Objects {
@@ -1195,13 +1591,36 @@ func (web *webAPIHandlers) DownloadZip(w http.ResponseWriter, r *http.Request) {
 				if !globalPolicySys.IsAllowed(policy.Args{
 					Action:          policy.GetObjectAction,
 					BucketName:      args.BucketName,
-					ConditionValues: getConditionValues(r, "", ""),
+					ConditionValues: getConditionValues(r, "", "", nil),
 					IsOwner:         false,
 					ObjectName:      pathJoin(args.Prefix, object),
 				}) {
 					writeWebErrorResponse(w, errAuthentication)
 					return
 				}
+				retentionPerm := ErrAccessDenied
+				if globalPolicySys.IsAllowed(policy.Args{
+					Action:          policy.GetObjectRetentionAction,
+					BucketName:      args.BucketName,
+					ConditionValues: getConditionValues(r, "", "", nil),
+					IsOwner:         false,
+					ObjectName:      pathJoin(args.Prefix, object),
+				}) {
+					retentionPerm = ErrNone
+				}
+				getRetPerms = append(getRetPerms, retentionPerm)
+
+				legalHoldPerm := ErrAccessDenied
+				if globalPolicySys.IsAllowed(policy.Args{
+					Action:          policy.GetObjectLegalHoldAction,
+					BucketName:      args.BucketName,
+					ConditionValues: getConditionValues(r, "", "", nil),
+					IsOwner:         false,
+					ObjectName:      pathJoin(args.Prefix, object),
+				}) {
+					legalHoldPerm = ErrNone
+				}
+				legalHoldPerms = append(legalHoldPerms, legalHoldPerm)
 			}
 		} else {
 			writeWebErrorResponse(w, authErr)
@@ -1213,131 +1632,105 @@ func (web *webAPIHandlers) DownloadZip(w http.ResponseWriter, r *http.Request) {
 	if authErr == nil {
 		for _, object := range args.Objects {
 			if !globalIAMSys.IsAllowed(iampolicy.Args{
-				AccountName:     claims.Subject,
+				AccountName:     claims.AccessKey,
 				Action:          iampolicy.GetObjectAction,
 				BucketName:      args.BucketName,
-				ConditionValues: getConditionValues(r, "", claims.Subject),
+				ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
 				IsOwner:         owner,
 				ObjectName:      pathJoin(args.Prefix, object),
+				Claims:          claims.Map(),
 			}) {
 				writeWebErrorResponse(w, errAuthentication)
 				return
 			}
+			retentionPerm := ErrAccessDenied
+			if globalIAMSys.IsAllowed(iampolicy.Args{
+				AccountName:     claims.AccessKey,
+				Action:          iampolicy.GetObjectRetentionAction,
+				BucketName:      args.BucketName,
+				ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+				IsOwner:         owner,
+				ObjectName:      pathJoin(args.Prefix, object),
+				Claims:          claims.Map(),
+			}) {
+				retentionPerm = ErrNone
+			}
+			getRetPerms = append(getRetPerms, retentionPerm)
+
+			legalHoldPerm := ErrAccessDenied
+			if globalIAMSys.IsAllowed(iampolicy.Args{
+				AccountName:     claims.AccessKey,
+				Action:          iampolicy.GetObjectLegalHoldAction,
+				BucketName:      args.BucketName,
+				ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+				IsOwner:         owner,
+				ObjectName:      pathJoin(args.Prefix, object),
+				Claims:          claims.Map(),
+			}) {
+				legalHoldPerm = ErrNone
+			}
+			legalHoldPerms = append(legalHoldPerms, legalHoldPerm)
 		}
 	}
 
-	getObject := objectAPI.GetObject
-	if web.CacheAPI() != nil {
-		getObject = web.CacheAPI().GetObject
+	// Check if bucket is a reserved bucket name or invalid.
+	if isReservedOrInvalidBucket(args.BucketName, false) {
+		writeWebErrorResponse(w, errInvalidBucketName)
+		return
 	}
-	listObjects := objectAPI.ListObjects
+
+	getObjectNInfo := objectAPI.GetObjectNInfo
 	if web.CacheAPI() != nil {
-		listObjects = web.CacheAPI().ListObjects
+		getObjectNInfo = web.CacheAPI().GetObjectNInfo
 	}
 
 	archive := zip.NewWriter(w)
 	defer archive.Close()
 
-	getObjectInfo := objectAPI.GetObjectInfo
-	if web.CacheAPI() != nil {
-		getObjectInfo = web.CacheAPI().GetObjectInfo
-	}
-	opts := ObjectOptions{}
-	var length int64
-	for _, object := range args.Objects {
+	reqParams := extractReqParams(r)
+	reqParams["accessKey"] = claims.GetAccessKey()
+	respElements := extractRespElements(w)
+
+	for i, object := range args.Objects {
+		if contextCanceled(ctx) {
+			return
+		}
 		// Writes compressed object file to the response.
 		zipit := func(objectName string) error {
-			info, err := getObjectInfo(ctx, args.BucketName, objectName, opts)
+			var opts ObjectOptions
+			gr, err := getObjectNInfo(ctx, args.BucketName, objectName, nil, r.Header, readLock, opts)
 			if err != nil {
 				return err
 			}
-			length = info.Size
-			if objectAPI.IsEncryptionSupported() {
-				if _, err = DecryptObjectInfo(&info, r.Header); err != nil {
-					writeWebErrorResponse(w, err)
-					return err
-				}
-				if crypto.IsEncrypted(info.UserDefined) {
-					length, _ = info.DecryptedSize()
-				}
-			}
-			length = info.Size
-			var actualSize int64
-			if info.IsCompressed() {
-				// Read the decompressed size from the meta.json.
-				actualSize = info.GetActualSize()
-				// Set the info.Size to the actualSize.
-				info.Size = actualSize
+			defer gr.Close()
+
+			info := gr.ObjInfo
+			// filter object lock metadata if permission does not permit
+			info.UserDefined = objectlock.FilterObjectLockMetadata(info.UserDefined, getRetPerms[i] != ErrNone, legalHoldPerms[i] != ErrNone)
+			// For reporting, set the file size to the uncompressed size.
+			info.Size, err = info.GetActualSize()
+			if err != nil {
+				return err
 			}
 			header := &zip.FileHeader{
 				Name:               strings.TrimPrefix(objectName, args.Prefix),
 				Method:             zip.Deflate,
-				UncompressedSize64: uint64(length),
-				UncompressedSize:   uint32(length),
+				Flags:              1 << 11,
+				Modified:           info.ModTime,
+				UncompressedSize64: uint64(info.Size),
 			}
-			zipWriter, err := archive.CreateHeader(header)
+			if info.Size < 20 || hasStringSuffixInSlice(info.Name, standardExcludeCompressExtensions) || hasPattern(standardExcludeCompressContentTypes, info.ContentType) {
+				// We strictly disable compression for standard extensions/content-types.
+				header.Method = zip.Store
+			}
+			writer, err := archive.CreateHeader(header)
 			if err != nil {
-				writeWebErrorResponse(w, errUnexpected)
 				return err
 			}
-			var startOffset int64
-			var writer io.Writer
 
-			if info.IsCompressed() {
-				// The decompress metrics are set.
-				snappyStartOffset := 0
-				snappyLength := actualSize
-
-				// Open a pipe for compression
-				// Where compressWriter is actually passed to the getObject
-				decompressReader, compressWriter := io.Pipe()
-				snappyReader := snappy.NewReader(decompressReader)
-
-				// The limit is set to the actual size.
-				responseWriter := ioutil.LimitedWriter(zipWriter, int64(snappyStartOffset), snappyLength)
-				wg.Add(1) //For closures.
-				go func() {
-					defer wg.Done()
-					// Finally, writes to the client.
-					_, perr := io.Copy(responseWriter, snappyReader)
-
-					// Close the compressWriter if the data is read already.
-					// Closing the pipe, releases the writer passed to the getObject.
-					compressWriter.CloseWithError(perr)
-				}()
-				writer = compressWriter
-			} else {
-				writer = zipWriter
-			}
-			if objectAPI.IsEncryptionSupported() && crypto.S3.IsEncrypted(info.UserDefined) {
-				// Response writer should be limited early on for decryption upto required length,
-				// additionally also skipping mod(offset)64KiB boundaries.
-				writer = ioutil.LimitedWriter(writer, startOffset%(64*1024), length)
-				writer, startOffset, length, err = DecryptBlocksRequest(writer, r,
-					args.BucketName, objectName, startOffset, length, info, false)
-				if err != nil {
-					writeWebErrorResponse(w, err)
-					return err
-				}
-			}
-			httpWriter := ioutil.WriteOnClose(writer)
-			if err = getObject(ctx, args.BucketName, objectName, startOffset, length, httpWriter, "", opts); err != nil {
-				httpWriter.Close()
-				if info.IsCompressed() {
-					// Wait for decompression go-routine to retire.
-					wg.Wait()
-				}
+			// Write object content to response body
+			if _, err = io.Copy(writer, gr); err != nil {
 				return err
-			}
-			if err = httpWriter.Close(); err != nil {
-				if !httpWriter.HasWritten() { // write error response only if no data has been written to client yet
-					writeWebErrorResponse(w, err)
-					return err
-				}
-			}
-			if info.IsCompressed() {
-				// Wait for decompression go-routine to retire.
-				wg.Wait()
 			}
 
 			// Notify object accessed via a GET request.
@@ -1345,42 +1738,37 @@ func (web *webAPIHandlers) DownloadZip(w http.ResponseWriter, r *http.Request) {
 				EventName:    event.ObjectAccessedGet,
 				BucketName:   args.BucketName,
 				Object:       info,
-				ReqParams:    extractReqParams(r),
-				RespElements: extractRespElements(w),
+				ReqParams:    reqParams,
+				RespElements: respElements,
 				UserAgent:    r.UserAgent(),
 				Host:         host,
-				Port:         port,
 			})
 
 			return nil
 		}
 
-		if !hasSuffix(object, slashSeparator) {
+		if !HasSuffix(object, SlashSeparator) {
 			// If not a directory, compress the file and write it to response.
 			err := zipit(pathJoin(args.Prefix, object))
 			if err != nil {
+				logger.LogIf(ctx, err)
 				return
 			}
 			continue
 		}
 
-		// For directories, list the contents recursively and write the objects as compressed
-		// date to the response writer.
-		marker := ""
-		for {
-			lo, err := listObjects(context.Background(), args.BucketName, pathJoin(args.Prefix, object), marker, "", 1000)
-			if err != nil {
-				return
-			}
-			marker = lo.NextMarker
-			for _, obj := range lo.Objects {
-				err = zipit(obj.Name)
-				if err != nil {
-					return
-				}
-			}
-			if !lo.IsTruncated {
-				break
+		objInfoCh := make(chan ObjectInfo)
+
+		// Walk through all objects
+		if err := objectAPI.Walk(ctx, args.BucketName, pathJoin(args.Prefix, object), objInfoCh, ObjectOptions{}); err != nil {
+			logger.LogIf(ctx, err)
+			continue
+		}
+
+		for obj := range objInfoCh {
+			if err := zipit(obj.Name); err != nil {
+				logger.LogIf(ctx, err)
+				continue
 			}
 		}
 	}
@@ -1400,64 +1788,79 @@ type GetBucketPolicyRep struct {
 
 // GetBucketPolicy - get bucket policy for the requested prefix.
 func (web *webAPIHandlers) GetBucketPolicy(r *http.Request, args *GetBucketPolicyArgs, reply *GetBucketPolicyRep) error {
+	ctx := newWebContext(r, args, "WebGetBucketPolicy")
+
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
-		return toJSONError(errServerNotInitialized)
+		return toJSONError(ctx, errServerNotInitialized)
 	}
 
-	_, owner, authErr := webRequestAuthenticate(r)
+	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
-	if !owner {
-		return toJSONError(errAccessDenied)
+
+	// For authenticated users apply IAM policy.
+	if !globalIAMSys.IsAllowed(iampolicy.Args{
+		AccountName:     claims.AccessKey,
+		Action:          iampolicy.GetBucketPolicyAction,
+		BucketName:      args.BucketName,
+		ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+		IsOwner:         owner,
+		Claims:          claims.Map(),
+	}) {
+		return toJSONError(ctx, errAccessDenied)
+	}
+
+	// Check if bucket is a reserved bucket name or invalid.
+	if isReservedOrInvalidBucket(args.BucketName, false) {
+		return toJSONError(ctx, errInvalidBucketName, args.BucketName)
 	}
 
 	var policyInfo = &miniogopolicy.BucketAccessPolicy{Version: "2012-10-17"}
-	if isRemoteCallRequired(context.Background(), args.BucketName, objectAPI) {
+	if isRemoteCallRequired(ctx, args.BucketName, objectAPI) {
 		sr, err := globalDNSConfig.Get(args.BucketName)
 		if err != nil {
 			if err == dns.ErrNoEntriesFound {
-				return toJSONError(BucketNotFound{
+				return toJSONError(ctx, BucketNotFound{
 					Bucket: args.BucketName,
 				}, args.BucketName)
 			}
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 		client, rerr := getRemoteInstanceClient(r, getHostFromSrv(sr))
 		if rerr != nil {
-			return toJSONError(rerr, args.BucketName)
+			return toJSONError(ctx, rerr, args.BucketName)
 		}
-		policyStr, err := client.GetBucketPolicy(args.BucketName)
+		policyStr, err := client.GetBucketPolicy(ctx, args.BucketName)
 		if err != nil {
-			return toJSONError(rerr, args.BucketName)
+			return toJSONError(ctx, rerr, args.BucketName)
 		}
 		bucketPolicy, err := policy.ParseConfig(strings.NewReader(policyStr), args.BucketName)
 		if err != nil {
-			return toJSONError(rerr, args.BucketName)
+			return toJSONError(ctx, rerr, args.BucketName)
 		}
 		policyInfo, err = PolicyToBucketAccessPolicy(bucketPolicy)
 		if err != nil {
 			// This should not happen.
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 	} else {
-		bucketPolicy, err := objectAPI.GetBucketPolicy(context.Background(), args.BucketName)
+		bucketPolicy, err := globalPolicySys.Get(args.BucketName)
 		if err != nil {
 			if _, ok := err.(BucketPolicyNotFound); !ok {
-				return toJSONError(err, args.BucketName)
+				return toJSONError(ctx, err, args.BucketName)
 			}
-			return err
 		}
 
 		policyInfo, err = PolicyToBucketAccessPolicy(bucketPolicy)
 		if err != nil {
 			// This should not happen.
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	reply.Policy = miniogopolicy.GetPolicy(policyInfo.Statements, args.BucketName, args.Prefix)
 
 	return nil
@@ -1483,60 +1886,75 @@ type ListAllBucketPoliciesRep struct {
 
 // ListAllBucketPolicies - get all bucket policy.
 func (web *webAPIHandlers) ListAllBucketPolicies(r *http.Request, args *ListAllBucketPoliciesArgs, reply *ListAllBucketPoliciesRep) error {
+	ctx := newWebContext(r, args, "WebListAllBucketPolicies")
 	objectAPI := web.ObjectAPI()
 	if objectAPI == nil {
-		return toJSONError(errServerNotInitialized)
+		return toJSONError(ctx, errServerNotInitialized)
 	}
 
-	_, owner, authErr := webRequestAuthenticate(r)
+	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
-	if !owner {
-		return toJSONError(errAccessDenied)
+
+	// For authenticated users apply IAM policy.
+	if !globalIAMSys.IsAllowed(iampolicy.Args{
+		AccountName:     claims.AccessKey,
+		Action:          iampolicy.GetBucketPolicyAction,
+		BucketName:      args.BucketName,
+		ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+		IsOwner:         owner,
+		Claims:          claims.Map(),
+	}) {
+		return toJSONError(ctx, errAccessDenied)
+	}
+
+	// Check if bucket is a reserved bucket name or invalid.
+	if isReservedOrInvalidBucket(args.BucketName, false) {
+		return toJSONError(ctx, errInvalidBucketName, args.BucketName)
 	}
 
 	var policyInfo = new(miniogopolicy.BucketAccessPolicy)
-	if isRemoteCallRequired(context.Background(), args.BucketName, objectAPI) {
+	if isRemoteCallRequired(ctx, args.BucketName, objectAPI) {
 		sr, err := globalDNSConfig.Get(args.BucketName)
 		if err != nil {
 			if err == dns.ErrNoEntriesFound {
-				return toJSONError(BucketNotFound{
+				return toJSONError(ctx, BucketNotFound{
 					Bucket: args.BucketName,
 				}, args.BucketName)
 			}
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 		core, rerr := getRemoteInstanceClient(r, getHostFromSrv(sr))
 		if rerr != nil {
-			return toJSONError(rerr, args.BucketName)
+			return toJSONError(ctx, rerr, args.BucketName)
 		}
 		var policyStr string
-		policyStr, err = core.Client.GetBucketPolicy(args.BucketName)
+		policyStr, err = core.Client.GetBucketPolicy(ctx, args.BucketName)
 		if err != nil {
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 		if policyStr != "" {
 			if err = json.Unmarshal([]byte(policyStr), policyInfo); err != nil {
-				return toJSONError(err, args.BucketName)
+				return toJSONError(ctx, err, args.BucketName)
 			}
 		}
 	} else {
-		bucketPolicy, err := objectAPI.GetBucketPolicy(context.Background(), args.BucketName)
+		bucketPolicy, err := globalPolicySys.Get(args.BucketName)
 		if err != nil {
 			if _, ok := err.(BucketPolicyNotFound); !ok {
-				return toJSONError(err, args.BucketName)
+				return toJSONError(ctx, err, args.BucketName)
 			}
 		}
 		policyInfo, err = PolicyToBucketAccessPolicy(bucketPolicy)
 		if err != nil {
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 	}
 
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 	for prefix, policy := range miniogopolicy.GetPolicies(policyInfo.Statements, args.BucketName, "") {
-		bucketName, objectPrefix := urlPath2BucketObjectName(prefix)
+		bucketName, objectPrefix := path2BucketObject(prefix)
 		objectPrefix = strings.TrimSuffix(objectPrefix, "*")
 		reply.Policies = append(reply.Policies, BucketAccessPolicy{
 			Bucket: bucketName,
@@ -1557,19 +1975,34 @@ type SetBucketPolicyWebArgs struct {
 
 // SetBucketPolicy - set bucket policy.
 func (web *webAPIHandlers) SetBucketPolicy(r *http.Request, args *SetBucketPolicyWebArgs, reply *WebGenericRep) error {
+	ctx := newWebContext(r, args, "WebSetBucketPolicy")
 	objectAPI := web.ObjectAPI()
-	reply.UIVersion = browser.UIVersion
+	reply.UIVersion = Version
 
 	if objectAPI == nil {
-		return toJSONError(errServerNotInitialized)
+		return toJSONError(ctx, errServerNotInitialized)
 	}
 
-	_, owner, authErr := webRequestAuthenticate(r)
+	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
-	if !owner {
-		return toJSONError(errAccessDenied)
+
+	// For authenticated users apply IAM policy.
+	if !globalIAMSys.IsAllowed(iampolicy.Args{
+		AccountName:     claims.AccessKey,
+		Action:          iampolicy.PutBucketPolicyAction,
+		BucketName:      args.BucketName,
+		ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+		IsOwner:         owner,
+		Claims:          claims.Map(),
+	}) {
+		return toJSONError(ctx, errAccessDenied)
+	}
+
+	// Check if bucket is a reserved bucket name or invalid.
+	if isReservedOrInvalidBucket(args.BucketName, false) {
+		return toJSONError(ctx, errInvalidBucketName, args.BucketName)
 	}
 
 	policyType := miniogopolicy.BucketPolicy(args.Policy)
@@ -1579,40 +2012,38 @@ func (web *webAPIHandlers) SetBucketPolicy(r *http.Request, args *SetBucketPolic
 		}
 	}
 
-	ctx := context.Background()
-
-	if isRemoteCallRequired(context.Background(), args.BucketName, objectAPI) {
+	if isRemoteCallRequired(ctx, args.BucketName, objectAPI) {
 		sr, err := globalDNSConfig.Get(args.BucketName)
 		if err != nil {
 			if err == dns.ErrNoEntriesFound {
-				return toJSONError(BucketNotFound{
+				return toJSONError(ctx, BucketNotFound{
 					Bucket: args.BucketName,
 				}, args.BucketName)
 			}
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 		core, rerr := getRemoteInstanceClient(r, getHostFromSrv(sr))
 		if rerr != nil {
-			return toJSONError(rerr, args.BucketName)
+			return toJSONError(ctx, rerr, args.BucketName)
 		}
 		var policyStr string
 		// Use the abstracted API instead of core, such that
 		// NoSuchBucketPolicy errors are automatically handled.
-		policyStr, err = core.Client.GetBucketPolicy(args.BucketName)
+		policyStr, err = core.Client.GetBucketPolicy(ctx, args.BucketName)
 		if err != nil {
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 		var policyInfo = &miniogopolicy.BucketAccessPolicy{Version: "2012-10-17"}
 		if policyStr != "" {
 			if err = json.Unmarshal([]byte(policyStr), policyInfo); err != nil {
-				return toJSONError(err, args.BucketName)
+				return toJSONError(ctx, err, args.BucketName)
 			}
 		}
 
 		policyInfo.Statements = miniogopolicy.SetPolicy(policyInfo.Statements, policyType, args.BucketName, args.Prefix)
 		if len(policyInfo.Statements) == 0 {
-			if err = core.SetBucketPolicy(args.BucketName, ""); err != nil {
-				return toJSONError(err, args.BucketName)
+			if err = core.SetBucketPolicy(ctx, args.BucketName, ""); err != nil {
+				return toJSONError(ctx, err, args.BucketName)
 			}
 			return nil
 		}
@@ -1620,54 +2051,55 @@ func (web *webAPIHandlers) SetBucketPolicy(r *http.Request, args *SetBucketPolic
 		bucketPolicy, err := BucketAccessPolicyToPolicy(policyInfo)
 		if err != nil {
 			// This should not happen.
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 
 		policyData, err := json.Marshal(bucketPolicy)
 		if err != nil {
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 
-		if err = core.SetBucketPolicy(args.BucketName, string(policyData)); err != nil {
-			return toJSONError(err, args.BucketName)
+		if err = core.SetBucketPolicy(ctx, args.BucketName, string(policyData)); err != nil {
+			return toJSONError(ctx, err, args.BucketName)
 		}
 
 	} else {
-		bucketPolicy, err := objectAPI.GetBucketPolicy(ctx, args.BucketName)
+		bucketPolicy, err := globalPolicySys.Get(args.BucketName)
 		if err != nil {
 			if _, ok := err.(BucketPolicyNotFound); !ok {
-				return toJSONError(err, args.BucketName)
+				return toJSONError(ctx, err, args.BucketName)
 			}
 		}
 		policyInfo, err := PolicyToBucketAccessPolicy(bucketPolicy)
 		if err != nil {
 			// This should not happen.
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
 		}
 
 		policyInfo.Statements = miniogopolicy.SetPolicy(policyInfo.Statements, policyType, args.BucketName, args.Prefix)
 		if len(policyInfo.Statements) == 0 {
-			if err = objectAPI.DeleteBucketPolicy(ctx, args.BucketName); err != nil {
-				return toJSONError(err, args.BucketName)
+			if err = globalBucketMetadataSys.Update(args.BucketName, bucketPolicyConfig, nil); err != nil {
+				return toJSONError(ctx, err, args.BucketName)
 			}
 
-			globalPolicySys.Remove(args.BucketName)
 			return nil
 		}
 
 		bucketPolicy, err = BucketAccessPolicyToPolicy(policyInfo)
 		if err != nil {
 			// This should not happen.
-			return toJSONError(err, args.BucketName)
+			return toJSONError(ctx, err, args.BucketName)
+		}
+
+		configData, err := json.Marshal(bucketPolicy)
+		if err != nil {
+			return toJSONError(ctx, err, args.BucketName)
 		}
 
 		// Parse validate and save bucket policy.
-		if err := objectAPI.SetBucketPolicy(ctx, args.BucketName, bucketPolicy); err != nil {
-			return toJSONError(err, args.BucketName)
+		if err = globalBucketMetadataSys.Update(args.BucketName, bucketPolicyConfig, configData); err != nil {
+			return toJSONError(ctx, err, args.BucketName)
 		}
-
-		globalPolicySys.Set(args.BucketName, *bucketPolicy)
-		globalNotificationSys.SetBucketPolicy(ctx, args.BucketName, bucketPolicy)
 	}
 
 	return nil
@@ -1697,29 +2129,49 @@ type PresignedGetRep struct {
 
 // PresignedGET - returns presigned-Get url.
 func (web *webAPIHandlers) PresignedGet(r *http.Request, args *PresignedGetArgs, reply *PresignedGetRep) error {
+	ctx := newWebContext(r, args, "WebPresignedGet")
 	claims, owner, authErr := webRequestAuthenticate(r)
 	if authErr != nil {
-		return toJSONError(authErr)
+		return toJSONError(ctx, authErr)
 	}
 	var creds auth.Credentials
 	if !owner {
 		var ok bool
-		creds, ok = globalIAMSys.GetUser(claims.Subject)
+		creds, ok = globalIAMSys.GetUser(claims.AccessKey)
 		if !ok {
-			return toJSONError(errInvalidAccessKeyID)
+			return toJSONError(ctx, errInvalidAccessKeyID)
 		}
 	} else {
-		creds = globalServerConfig.GetCredential()
+		creds = globalActiveCred
 	}
 
-	region := globalServerConfig.GetRegion()
+	region := globalServerRegion
 	if args.BucketName == "" || args.ObjectName == "" {
 		return &json2.Error{
 			Message: "Bucket and Object are mandatory arguments.",
 		}
 	}
 
-	reply.UIVersion = browser.UIVersion
+	// Check if bucket is a reserved bucket name or invalid.
+	if isReservedOrInvalidBucket(args.BucketName, false) {
+		return toJSONError(ctx, errInvalidBucketName, args.BucketName)
+	}
+
+	// Check if the user indeed has GetObject access,
+	// if not we do not need to generate presigned URLs
+	if !globalIAMSys.IsAllowed(iampolicy.Args{
+		AccountName:     claims.AccessKey,
+		Action:          iampolicy.GetObjectAction,
+		BucketName:      args.BucketName,
+		ConditionValues: getConditionValues(r, "", claims.AccessKey, claims.Map()),
+		IsOwner:         owner,
+		ObjectName:      args.ObjectName,
+		Claims:          claims.Map(),
+	}) {
+		return toJSONError(ctx, errPresignedNotAllowed)
+	}
+
+	reply.UIVersion = Version
 	reply.URL = presignedGet(args.HostName, args.BucketName, args.ObjectName, args.Expiry, creds, region)
 	return nil
 }
@@ -1728,6 +2180,7 @@ func (web *webAPIHandlers) PresignedGet(r *http.Request, args *PresignedGetArgs,
 func presignedGet(host, bucket, object string, expiry int64, creds auth.Credentials, region string) string {
 	accessKey := creds.AccessKey
 	secretKey := creds.SecretKey
+	sessionToken := creds.SessionToken
 
 	date := UTCNow()
 	dateStr := date.Format(iso8601Format)
@@ -1739,31 +2192,116 @@ func presignedGet(host, bucket, object string, expiry int64, creds auth.Credenti
 	}
 
 	query := url.Values{}
-	query.Set("X-Amz-Algorithm", signV4Algorithm)
-	query.Set("X-Amz-Credential", credential)
-	query.Set("X-Amz-Date", dateStr)
-	query.Set("X-Amz-Expires", expiryStr)
-	query.Set("X-Amz-SignedHeaders", "host")
+	query.Set(xhttp.AmzAlgorithm, signV4Algorithm)
+	query.Set(xhttp.AmzCredential, credential)
+	query.Set(xhttp.AmzDate, dateStr)
+	query.Set(xhttp.AmzExpires, expiryStr)
+	query.Set(xhttp.ContentDisposition, fmt.Sprintf("attachment; filename=\"%s\"", object))
+	// Set session token if available.
+	if sessionToken != "" {
+		query.Set(xhttp.AmzSecurityToken, sessionToken)
+	}
+	query.Set(xhttp.AmzSignedHeaders, "host")
 	queryStr := s3utils.QueryEncode(query)
 
-	path := "/" + path.Join(bucket, object)
+	path := SlashSeparator + path.Join(bucket, object)
 
 	// "host" is the only header required to be signed for Presigned URLs.
 	extractedSignedHeaders := make(http.Header)
 	extractedSignedHeaders.Set("host", host)
-	canonicalRequest := getCanonicalRequest(extractedSignedHeaders, unsignedPayload, queryStr, path, "GET")
+	canonicalRequest := getCanonicalRequest(extractedSignedHeaders, unsignedPayload, queryStr, path, http.MethodGet)
 	stringToSign := getStringToSign(canonicalRequest, date, getScope(date, region))
-	signingKey := getSigningKey(secretKey, date, region)
+	signingKey := getSigningKey(secretKey, date, region, serviceS3)
 	signature := getSignature(signingKey, stringToSign)
 
-	// Construct the final presigned URL.
-	return host + s3utils.EncodePath(path) + "?" + queryStr + "&" + "X-Amz-Signature=" + signature
+	return host + s3utils.EncodePath(path) + "?" + queryStr + "&" + xhttp.AmzSignature + "=" + signature
+}
+
+// DiscoveryDocResp - OpenID discovery document reply.
+type DiscoveryDocResp struct {
+	DiscoveryDoc openid.DiscoveryDoc
+	UIVersion    string `json:"uiVersion"`
+	ClientID     string `json:"clientId"`
+}
+
+// GetDiscoveryDoc - returns parsed value of OpenID discovery document
+func (web *webAPIHandlers) GetDiscoveryDoc(r *http.Request, args *WebGenericArgs, reply *DiscoveryDocResp) error {
+	if globalOpenIDConfig.DiscoveryDoc.AuthEndpoint != "" {
+		reply.DiscoveryDoc = globalOpenIDConfig.DiscoveryDoc
+		reply.ClientID = globalOpenIDConfig.ClientID
+	}
+	reply.UIVersion = Version
+	return nil
+}
+
+// LoginSTSArgs - login arguments.
+type LoginSTSArgs struct {
+	Token string `json:"token" form:"token"`
+}
+
+var errSTSNotInitialized = errors.New("STS API not initialized, please configure STS support")
+
+// LoginSTS - STS user login handler.
+func (web *webAPIHandlers) LoginSTS(r *http.Request, args *LoginSTSArgs, reply *LoginRep) error {
+	ctx := newWebContext(r, args, "WebLoginSTS")
+
+	if globalOpenIDValidators == nil {
+		return toJSONError(ctx, errSTSNotInitialized)
+	}
+
+	v, err := globalOpenIDValidators.Get("jwt")
+	if err != nil {
+		logger.LogIf(ctx, err)
+		return toJSONError(ctx, errSTSNotInitialized)
+	}
+
+	m, err := v.Validate(args.Token, "")
+	if err != nil {
+		return toJSONError(ctx, err)
+	}
+
+	// JWT has requested a custom claim with policy value set.
+	// This is a MinIO STS API specific value, this value should
+	// be set and configured on your identity provider as part of
+	// JWT custom claims.
+	var policyName string
+	policySet, ok := iampolicy.GetPoliciesFromClaims(m, iamPolicyClaimNameOpenID())
+	if ok {
+		policyName = globalIAMSys.CurrentPolicies(strings.Join(policySet.ToSlice(), ","))
+	}
+	if policyName == "" && globalPolicyOPA == nil {
+		return toJSONError(ctx, fmt.Errorf("%s claim missing from the JWT token, credentials will not be generated", iamPolicyClaimNameOpenID()))
+	}
+	m[iamPolicyClaimNameOpenID()] = policyName
+
+	secret := globalActiveCred.SecretKey
+	cred, err := auth.GetNewCredentialsWithMetadata(m, secret)
+	if err != nil {
+		return toJSONError(ctx, err)
+	}
+
+	// Set the newly generated credentials.
+	if err = globalIAMSys.SetTempUser(cred.AccessKey, cred, policyName); err != nil {
+		return toJSONError(ctx, err)
+	}
+
+	// Notify all other MinIO peers to reload temp users
+	for _, nerr := range globalNotificationSys.LoadUser(cred.AccessKey, true) {
+		if nerr.Err != nil {
+			logger.GetReqInfo(ctx).SetTags("peerAddress", nerr.Host.String())
+			logger.LogIf(ctx, nerr.Err)
+		}
+	}
+
+	reply.Token = cred.SessionToken
+	reply.UIVersion = Version
+	return nil
 }
 
 // toJSONError converts regular errors into more user friendly
 // and consumable error message for the browser UI.
-func toJSONError(err error, params ...string) (jerr *json2.Error) {
-	apiErr := toWebAPIError(err)
+func toJSONError(ctx context.Context, err error, params ...string) (jerr *json2.Error) {
+	apiErr := toWebAPIError(ctx, err)
 	jerr = &json2.Error{
 		Message: apiErr.Description,
 	}
@@ -1802,68 +2340,60 @@ func toJSONError(err error, params ...string) (jerr *json2.Error) {
 }
 
 // toWebAPIError - convert into error into APIError.
-func toWebAPIError(err error) APIError {
-	if err == errAuthentication {
+func toWebAPIError(ctx context.Context, err error) APIError {
+	switch err {
+	case errNoAuthToken:
 		return APIError{
-			Code:           "AccessDenied",
-			HTTPStatusCode: http.StatusForbidden,
+			Code:           "WebTokenMissing",
+			HTTPStatusCode: http.StatusBadRequest,
 			Description:    err.Error(),
 		}
-	} else if err == errServerNotInitialized {
+	case errSTSNotInitialized:
+		return APIError(stsErrCodes.ToSTSErr(ErrSTSNotInitialized))
+	case errServerNotInitialized:
 		return APIError{
 			Code:           "XMinioServerNotInitialized",
 			HTTPStatusCode: http.StatusServiceUnavailable,
 			Description:    err.Error(),
 		}
-	} else if err == auth.ErrInvalidAccessKeyLength {
+	case errAuthentication, auth.ErrInvalidAccessKeyLength,
+		auth.ErrInvalidSecretKeyLength, errInvalidAccessKeyID, errAccessDenied, errLockedObject:
 		return APIError{
 			Code:           "AccessDenied",
 			HTTPStatusCode: http.StatusForbidden,
 			Description:    err.Error(),
 		}
-	} else if err == auth.ErrInvalidSecretKeyLength {
-		return APIError{
-			Code:           "AccessDenied",
-			HTTPStatusCode: http.StatusForbidden,
-			Description:    err.Error(),
-		}
-	} else if err == errInvalidAccessKeyID {
-		return APIError{
-			Code:           "AccessDenied",
-			HTTPStatusCode: http.StatusForbidden,
-			Description:    err.Error(),
-		}
-	} else if err == errSizeUnspecified {
+	case errSizeUnspecified:
 		return APIError{
 			Code:           "InvalidRequest",
 			HTTPStatusCode: http.StatusBadRequest,
 			Description:    err.Error(),
 		}
-	} else if err == errChangeCredNotAllowed {
+	case errChangeCredNotAllowed:
 		return APIError{
 			Code:           "MethodNotAllowed",
 			HTTPStatusCode: http.StatusMethodNotAllowed,
 			Description:    err.Error(),
 		}
-	} else if err == errInvalidBucketName {
+	case errInvalidBucketName:
 		return APIError{
 			Code:           "InvalidBucketName",
 			HTTPStatusCode: http.StatusBadRequest,
 			Description:    err.Error(),
 		}
-	} else if err == errInvalidArgument {
+	case errInvalidArgument:
 		return APIError{
 			Code:           "InvalidArgument",
 			HTTPStatusCode: http.StatusBadRequest,
 			Description:    err.Error(),
 		}
-	} else if err == errEncryptedObject {
+	case errEncryptedObject:
 		return getAPIError(ErrSSEEncryptedObject)
-	} else if err == errInvalidEncryptionParameters {
+	case errInvalidEncryptionParameters:
 		return getAPIError(ErrInvalidEncryptionParameters)
-	} else if err == errObjectTampered {
+	case errObjectTampered:
 		return getAPIError(ErrObjectTampered)
-	} else if err == errMethodNotAllowed {
+	case errMethodNotAllowed:
 		return getAPIError(ErrMethodNotAllowed)
 	}
 
@@ -1871,8 +2401,12 @@ func toWebAPIError(err error) APIError {
 	switch err.(type) {
 	case StorageFull:
 		return getAPIError(ErrStorageFull)
+	case BucketQuotaExceeded:
+		return getAPIError(ErrAdminBucketQuotaExceeded)
 	case BucketNotFound:
 		return getAPIError(ErrNoSuchBucket)
+	case BucketNotEmpty:
+		return getAPIError(ErrBucketNotEmpty)
 	case BucketExists:
 		return getAPIError(ErrBucketAlreadyOwnedByYou)
 	case BucketNameInvalid:
@@ -1891,8 +2425,6 @@ func toWebAPIError(err error) APIError {
 		return getAPIError(ErrWriteQuorum)
 	case InsufficientReadQuorum:
 		return getAPIError(ErrReadQuorum)
-	case PolicyNesting:
-		return getAPIError(ErrPolicyNesting)
 	case NotImplemented:
 		return APIError{
 			Code:           "NotImplemented",
@@ -1902,17 +2434,17 @@ func toWebAPIError(err error) APIError {
 	}
 
 	// Log unexpected and unhandled errors.
-	logger.LogIf(context.Background(), err)
-	return APIError{
-		Code:           "InternalError",
-		HTTPStatusCode: http.StatusInternalServerError,
-		Description:    err.Error(),
-	}
+	logger.LogIf(ctx, err)
+	return toAPIError(ctx, err)
 }
 
 // writeWebErrorResponse - set HTTP status code and write error description to the body.
 func writeWebErrorResponse(w http.ResponseWriter, err error) {
-	apiErr := toWebAPIError(err)
+	reqInfo := &logger.ReqInfo{
+		DeploymentID: globalDeploymentID,
+	}
+	ctx := logger.SetReqInfo(GlobalContext, reqInfo)
+	apiErr := toWebAPIError(ctx, err)
 	w.WriteHeader(apiErr.HTTPStatusCode)
 	w.Write([]byte(apiErr.Description))
 }

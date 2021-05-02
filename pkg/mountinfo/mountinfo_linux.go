@@ -1,20 +1,21 @@
 // +build linux
 
-/*
- * Minio Cloud Storage, (C) 2017, 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package mountinfo
 
@@ -37,24 +38,30 @@ const (
 )
 
 // IsLikelyMountPoint determines if a directory is a mountpoint.
-// It is fast but not necessarily ALWAYS correct. If the path is in fact
-// a bind mount from one part of a mount to another it will not be detected.
-// mkdir /tmp/a /tmp/b; mount --bin /tmp/a /tmp/b; IsLikelyMountPoint("/tmp/b")
-// will return false. When in fact /tmp/b is a mount point. If this situation
-// if of interest to you, don't use this function...
-func IsLikelyMountPoint(file string) bool {
-	stat, err := os.Stat(file)
+func IsLikelyMountPoint(path string) bool {
+	s1, err := os.Lstat(path)
 	if err != nil {
 		return false
 	}
 
-	rootStat, err := os.Lstat(filepath.Dir(strings.TrimSuffix(file, "/")))
+	// A symlink can never be a mount point
+	if s1.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+
+	s2, err := os.Lstat(filepath.Dir(strings.TrimSuffix(path, "/")))
 	if err != nil {
 		return false
 	}
 
 	// If the directory has a different device as parent, then it is a mountpoint.
-	return stat.Sys().(*syscall.Stat_t).Dev != rootStat.Sys().(*syscall.Stat_t).Dev
+	if s1.Sys().(*syscall.Stat_t).Dev != s2.Sys().(*syscall.Stat_t).Dev {
+		//  path/.. on a different device as path
+		return true
+	}
+
+	// path/.. is the same i-node as path - this check is for bind mounts.
+	return s1.Sys().(*syscall.Stat_t).Ino == s2.Sys().(*syscall.Stat_t).Ino
 }
 
 // CheckCrossDevice - check if any list of paths has any sub-mounts at /proc/mounts.
@@ -125,9 +132,11 @@ func parseMountFrom(file io.Reader) (mountInfos, error) {
 		if err == io.EOF {
 			break
 		}
+
 		fields := strings.Fields(line)
 		if len(fields) != expectedNumFieldsPerLine {
-			return nil, fmt.Errorf("wrong number of fields (expected %d, got %d): %s", expectedNumFieldsPerLine, len(fields), line)
+			// ignore incorrect lines.
+			continue
 		}
 
 		// Freq should be an integer.

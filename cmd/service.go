@@ -1,33 +1,36 @@
-/*
- * Minio Cloud Storage, (C) 2016 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
+	"context"
 	"os"
 	"os/exec"
+	"syscall"
 )
 
 // Type of service signals currently supported.
 type serviceSignal int
 
 const (
-	serviceStatus  = iota // Gets status about the service.
-	serviceRestart        // Restarts the service.
-	serviceStop           // Stops the server.
+	serviceRestart       serviceSignal = iota // Restarts the server.
+	serviceStop                               // Stops the server.
+	serviceReloadDynamic                      // Reload dynamic config values.
 	// Add new service requests here.
 )
 
@@ -35,11 +38,17 @@ const (
 var globalServiceSignalCh chan serviceSignal
 
 // GlobalServiceDoneCh - Global service done channel.
-var GlobalServiceDoneCh chan struct{}
+var GlobalServiceDoneCh <-chan struct{}
 
-// Initialize service mutex once.
-func init() {
-	GlobalServiceDoneCh = make(chan struct{}, 1)
+// GlobalContext context that is canceled when server is requested to shut down.
+var GlobalContext context.Context
+
+// cancelGlobalContext can be used to indicate server shutdown.
+var cancelGlobalContext context.CancelFunc
+
+func initGlobalContext() {
+	GlobalContext, cancelGlobalContext = context.WithCancel(context.Background())
+	GlobalServiceDoneCh = GlobalContext.Done()
 	globalServiceSignalCh = make(chan serviceSignal)
 }
 
@@ -56,9 +65,7 @@ func restartProcess() error {
 		return err
 	}
 
-	// Pass on the environment and replace the old count key with the new one.
-	cmd := exec.Command(argv0, os.Args[1:]...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Start()
+	// Invokes the execve system call.
+	// Re-uses the same pid. This preserves the pid over multiple server-respawns.
+	return syscall.Exec(argv0, os.Args, os.Environ())
 }

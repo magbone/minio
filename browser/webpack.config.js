@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2016 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -73,16 +73,17 @@ var exports = {
     },
     proxy: {
       '/minio/webrpc': {
-	target: 'http://localhost:9000',
-	secure: false
+        target: 'http://localhost:9000',
+        secure: false,
+        headers: {'Host': "localhost:9000"}
       },
       '/minio/upload/*': {
-	target: 'http://localhost:9000',
-	secure: false
+        target: 'http://localhost:9000',
+        secure: false
       },
       '/minio/download/*': {
-	target: 'http://localhost:9000',
-	secure: false
+        target: 'http://localhost:9000',
+        secure: false
       },
       '/minio/zip': {
         target: 'http://localhost:9000',
@@ -91,15 +92,17 @@ var exports = {
     }
   },
   plugins: [
-    new CopyWebpackPlugin([
+    new CopyWebpackPlugin({patterns: [
       {from: 'app/css/loader.css'},
-      {from: 'app/img/favicon.ico'},
       {from: 'app/img/browsers/chrome.png'},
       {from: 'app/img/browsers/firefox.png'},
       {from: 'app/img/browsers/safari.png'},
       {from: 'app/img/logo.svg'},
+      {from: 'app/img/favicon/favicon-16x16.png'},
+      {from: 'app/img/favicon/favicon-32x32.png'},
+      {from: 'app/img/favicon/favicon-96x96.png'},
       {from: 'app/index.html'}
-    ]),
+    ]}),
     new webpack.ContextReplacementPlugin(/moment[\\\/]locale$/, /^\.\/(en)$/),
     new PurgecssPlugin({
       paths: glob.sync([

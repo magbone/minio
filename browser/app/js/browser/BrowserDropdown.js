@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2016, 2017, 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -57,22 +57,6 @@ export class BrowserDropdown extends React.Component {
     const { fetchServerInfo } = this.props
     fetchServerInfo()
   }
-  fullScreen(e) {
-    e.preventDefault()
-    let el = document.documentElement
-    if (el.requestFullscreen) {
-      el.requestFullscreen()
-    }
-    if (el.mozRequestFullScreen) {
-      el.mozRequestFullScreen()
-    }
-    if (el.webkitRequestFullscreen) {
-      el.webkitRequestFullscreen()
-    }
-    if (el.msRequestFullscreen) {
-      el.msRequestFullscreen()
-    }
-  }
   logout(e) {
     e.preventDefault()
     web.Logout()
@@ -84,43 +68,12 @@ export class BrowserDropdown extends React.Component {
       <li>
         <Dropdown pullRight id="top-right-menu">
           <Dropdown.Toggle noCaret>
-            <i className="fa fa-reorder" />
+            <i className="fas fa-bars" />
           </Dropdown.Toggle>
           <Dropdown.Menu className="dropdown-menu-right">
             <li>
-              <a target="_blank" href="https://github.com/minio/minio">
-                GitHub <i className="fa fa-github" />
-              </a>
-            </li>
-            <li>
-              <a href="" onClick={this.fullScreen}>
-                Fullscreen <i className="fa fa-expand" />
-              </a>
-            </li>
-            <li>
-              <a target="_blank" href="https://docs.minio.io/">
-                Documentation <i className="fa fa-book" />
-              </a>
-            </li>
-            <li>
-              <a target="_blank" href="https://slack.minio.io">
-                Ask for help <i className="fa fa-question-circle" />
-              </a>
-            </li>
-            <li>
-              <a href="" id="show-about" onClick={this.showAbout.bind(this)}>
-                About <i className="fa fa-info-circle" />
-              </a>
-              {this.state.showAboutModal && (
-                <AboutModal
-                  serverInfo={serverInfo}
-                  hideAbout={this.hideAbout.bind(this)}
-                />
-              )}
-            </li>
-            <li>
               <a href="" onClick={this.showChangePassword.bind(this)}>
-                Change Password <i className="fa fa-cog" />
+                Change Password <i className="fas fa-cog" />
               </a>
               {this.state.showChangePasswordModal && (
                 <ChangePasswordModal
@@ -130,8 +83,34 @@ export class BrowserDropdown extends React.Component {
               )}
             </li>
             <li>
+              <a target="_blank" href="https://docs.min.io/?ref=ob">
+                Documentation <i className="fas fa-book" />
+              </a>
+            </li>
+            <li>
+              <a target="_blank" href="https://github.com/minio/minio">
+                GitHub <i className="fab fa-github" />
+              </a>
+            </li>
+            <li>
+              <a target="_blank" href="https://min.io/pricing?ref=ob">
+                Get Support <i className="fas fa-question-circle" />
+              </a>
+            </li>
+            <li>
+              <a href="" id="show-about" onClick={this.showAbout.bind(this)}>
+                About <i className="fas fa-info-circle" />
+              </a>
+              {this.state.showAboutModal && (
+                <AboutModal
+                  serverInfo={serverInfo}
+                  hideAbout={this.hideAbout.bind(this)}
+                />
+              )}
+            </li>
+            <li>
               <a href="" id="logout" onClick={this.logout}>
-                Sign Out <i className="fa fa-sign-out" />
+                Logout <i className="fas fa-sign-out-alt" />
               </a>
             </li>
           </Dropdown.Menu>

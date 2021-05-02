@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2015, 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -22,10 +23,13 @@ import (
 	"encoding/xml"
 	"io/ioutil"
 	"net/http"
+	"net/textproto"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/minio/minio/cmd/config"
 )
 
 // Tests validate bucket LocationConstraint.
@@ -41,7 +45,7 @@ func TestIsValidLocationContraint(t *testing.T) {
 
 	// Corrupted XML
 	malformedReq := &http.Request{
-		Body:          ioutil.NopCloser(bytes.NewBuffer([]byte("<>"))),
+		Body:          ioutil.NopCloser(bytes.NewReader([]byte("<>"))),
 		ContentLength: int64(len("<>")),
 	}
 
@@ -56,7 +60,7 @@ func TestIsValidLocationContraint(t *testing.T) {
 		createBucketConfig := createBucketLocationConfiguration{}
 		createBucketConfig.Location = location
 		createBucketConfigBytes, _ := xml.Marshal(createBucketConfig)
-		createBucketConfigBuffer := bytes.NewBuffer(createBucketConfigBytes)
+		createBucketConfigBuffer := bytes.NewReader(createBucketConfigBytes)
 		req.Body = ioutil.NopCloser(createBucketConfigBuffer)
 		req.ContentLength = int64(createBucketConfigBuffer.Len())
 		return req
@@ -81,7 +85,7 @@ func TestIsValidLocationContraint(t *testing.T) {
 	}
 
 	for i, testCase := range testCases {
-		globalServerConfig.SetRegion(testCase.serverConfigRegion)
+		config.SetRegion(globalServerConfig, testCase.serverConfigRegion)
 		_, actualCode := parseLocationConstraint(testCase.request)
 		if testCase.expectedCode != actualCode {
 			t.Errorf("Test %d: Expected the APIErrCode to be %d, but instead found %d", i+1, testCase.expectedCode, actualCode)
@@ -195,7 +199,7 @@ func TestExtractMetadataHeaders(t *testing.T) {
 	// Validate if the extracting headers.
 	for i, testCase := range testCases {
 		metadata := make(map[string]string)
-		err := extractMetadataFromMap(context.Background(), testCase.header, metadata)
+		err := extractMetadataFromMime(context.Background(), textproto.MIMEHeader(testCase.header), metadata)
 		if err != nil && !testCase.shouldFail {
 			t.Fatalf("Test %d failed to extract metadata: %v", i+1, err)
 		}

@@ -1,26 +1,35 @@
-/*
- * Minio Cloud Storage, (C) 2016 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
-	"context"
+	"bytes"
+	"fmt"
+	"io"
 	"net/http"
 	"reflect"
+	"strconv"
 	"testing"
+
+	"github.com/klauspost/compress/s2"
+	"github.com/minio/minio/cmd/config/compress"
+	"github.com/minio/minio/cmd/crypto"
+	"github.com/minio/minio/pkg/trie"
 )
 
 // Tests validate bucket name.
@@ -99,25 +108,36 @@ func TestIsValidObjectName(t *testing.T) {
 		{"f*le", true},
 		{"contains-^-carret", true},
 		{"contains-|-pipe", true},
-		{"contains-\"-quote", true},
 		{"contains-`-tick", true},
 		{"..test", true},
 		{".. test", true},
 		{". test", true},
 		{".test", true},
 		{"There are far too many object names, and far too few bucket names!", true},
+		{"!\"#$%&'()*+,-.／:;<=>?@[\\]^_`{|}~/!\"#$%&'()*+,-.／:;<=>?@[\\]^_`{|}~)", true},
+		{"!\"#$%&'()*+,-.／:;<=>?@[\\]^_`{|}~", true},
+		{"␀␁␂␃␄␅␆␇␈␉␊␋␌␍␎␏␐␑␒␓␔␕␖␗␘␙␚␛␜␝␞␟␡", true},
+		{"trailing VT␋/trailing VT␋", true},
+		{"␋leading VT/␋leading VT", true},
+		{"~leading tilde", true},
+		{"\rleading CR", true},
+		{"\nleading LF", true},
+		{"\tleading HT", true},
+		{"trailing CR\r", true},
+		{"trailing LF\n", true},
+		{"trailing HT\t", true},
 		// cases for which test should fail.
 		// passing invalid object names.
 		{"", false},
 		{"a/b/c/", false},
-		{"/a/b/c", false},
 		{"../../etc", false},
 		{"../../", false},
 		{"/../../etc", false},
 		{" ../etc", false},
 		{"./././", false},
 		{"./etc", false},
-		{"contains-\\-backslash", false},
+		{`contains//double/forwardslash`, false},
+		{`//contains/double-forwardslash-prefix`, false},
 		{string([]byte{0xff, 0xfe, 0xfd}), false},
 	}
 
@@ -139,8 +159,8 @@ func TestGetCompleteMultipartMD5(t *testing.T) {
 		expectedResult string
 		expectedErr    string
 	}{
-		// Wrong MD5 hash string
-		{[]CompletePart{{ETag: "wrong-md5-hash-string"}}, "", "encoding/hex: invalid byte: U+0077 'w'"},
+		// Wrong MD5 hash string, returns md5um of hash
+		{[]CompletePart{{ETag: "wrong-md5-hash-string"}}, "0deb8cb07527b4b2669c861cb9653607-1", ""},
 
 		// Single CompletePart with valid MD5 hash string.
 		{[]CompletePart{{ETag: "cf1f738a5924e645913c984e0fe3d708"}}, "10dc1617fbcf0bd0858048cb96e6bd77-1", ""},
@@ -150,16 +170,9 @@ func TestGetCompleteMultipartMD5(t *testing.T) {
 	}
 
 	for i, test := range testCases {
-		result, err := getCompleteMultipartMD5(context.Background(), test.parts)
+		result := getCompleteMultipartMD5(test.parts)
 		if result != test.expectedResult {
 			t.Fatalf("test %d failed: expected: result=%v, got=%v", i+1, test.expectedResult, result)
-		}
-		errString := ""
-		if err != nil {
-			errString = err.Error()
-		}
-		if errString != test.expectedErr {
-			t.Fatalf("test %d failed: expected: err=%v, got=%v", i+1, test.expectedErr, err)
 		}
 	}
 }
@@ -170,17 +183,17 @@ func TestIsMinioMetaBucketName(t *testing.T) {
 		bucket string
 		result bool
 	}{
-		// Minio meta bucket.
+		// MinIO meta bucket.
 		{
 			bucket: minioMetaBucket,
 			result: true,
 		},
-		// Minio meta bucket.
+		// MinIO meta bucket.
 		{
 			bucket: minioMetaMultipartBucket,
 			result: true,
 		},
-		// Minio meta bucket.
+		// MinIO meta bucket.
 		{
 			bucket: minioMetaTmpBucket,
 			result: true,
@@ -303,24 +316,53 @@ func TestIsCompressed(t *testing.T) {
 	testCases := []struct {
 		objInfo ObjectInfo
 		result  bool
+		err     bool
 	}{
-		{
+		0: {
 			objInfo: ObjectInfo{
-				UserDefined: map[string]string{"X-Minio-Internal-compression": "golang/snappy/LZ77",
+				UserDefined: map[string]string{"X-Minio-Internal-compression": compressionAlgorithmV1,
 					"content-type": "application/octet-stream",
 					"etag":         "b3ff3ef3789147152fbfbc50efba4bfd-2"},
 			},
 			result: true,
 		},
-		{
+		1: {
 			objInfo: ObjectInfo{
-				UserDefined: map[string]string{"X-Minio-Internal-XYZ": "golang/snappy/LZ77",
+				UserDefined: map[string]string{"X-Minio-Internal-compression": compressionAlgorithmV2,
+					"content-type": "application/octet-stream",
+					"etag":         "b3ff3ef3789147152fbfbc50efba4bfd-2"},
+			},
+			result: true,
+		},
+		2: {
+			objInfo: ObjectInfo{
+				UserDefined: map[string]string{"X-Minio-Internal-compression": "unknown/compression/type",
+					"content-type": "application/octet-stream",
+					"etag":         "b3ff3ef3789147152fbfbc50efba4bfd-2"},
+			},
+			result: true,
+			err:    true,
+		},
+		3: {
+			objInfo: ObjectInfo{
+				UserDefined: map[string]string{"X-Minio-Internal-compression": compressionAlgorithmV2,
+					"content-type": "application/octet-stream",
+					"etag":         "b3ff3ef3789147152fbfbc50efba4bfd-2",
+					crypto.MetaIV:  "yes",
+				},
+			},
+			result: true,
+			err:    false,
+		},
+		4: {
+			objInfo: ObjectInfo{
+				UserDefined: map[string]string{"X-Minio-Internal-XYZ": "klauspost/compress/s2",
 					"content-type": "application/octet-stream",
 					"etag":         "b3ff3ef3789147152fbfbc50efba4bfd-2"},
 			},
 			result: false,
 		},
-		{
+		5: {
 			objInfo: ObjectInfo{
 				UserDefined: map[string]string{"content-type": "application/octet-stream",
 					"etag": "b3ff3ef3789147152fbfbc50efba4bfd-2"},
@@ -329,11 +371,21 @@ func TestIsCompressed(t *testing.T) {
 		},
 	}
 	for i, test := range testCases {
-		got := test.objInfo.IsCompressed()
-		if got != test.result {
-			t.Errorf("Test %d - expected %v but received %v",
-				i+1, test.result, got)
-		}
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			got := test.objInfo.IsCompressed()
+			if got != test.result {
+				t.Errorf("IsCompressed: Expected %v but received %v",
+					test.result, got)
+			}
+			got, gErr := test.objInfo.IsCompressedOK()
+			if got != test.result {
+				t.Errorf("IsCompressedOK: Expected %v but received %v",
+					test.result, got)
+			}
+			if gErr != nil != test.err {
+				t.Errorf("IsCompressedOK: want error: %t, got error: %v", test.err, gErr)
+			}
+		})
 	}
 }
 
@@ -372,11 +424,18 @@ func TestExcludeForCompression(t *testing.T) {
 			},
 			result: false,
 		},
+		{
+			object: "object",
+			header: http.Header{
+				"Content-Type": []string{"text/something"},
+			},
+			result: false,
+		},
 	}
 	for i, test := range testCases {
-		globalIsCompressionEnabled = true
-		got := excludeForCompression(test.header, test.object)
-		globalIsCompressionEnabled = false
+		got := excludeForCompression(test.header, test.object, compress.Config{
+			Enabled: true,
+		})
 		if got != test.result {
 			t.Errorf("Test %d - expected %v but received %v",
 				i+1, test.result, got)
@@ -384,40 +443,22 @@ func TestExcludeForCompression(t *testing.T) {
 	}
 }
 
-// Test getPartFile function.
-func TestGetPartFile(t *testing.T) {
-	testCases := []struct {
-		entries    []string
-		partNumber int
-		etag       string
-		result     string
-	}{
-		{
-			entries:    []string{"00001.8a034f82cb9cb31140d87d3ce2a9ede3.67108864", "fs.json", "00002.d73d8ab724016dfb051e2d3584495c54.32891137"},
-			partNumber: 1,
-			etag:       "8a034f82cb9cb31140d87d3ce2a9ede3",
-			result:     "00001.8a034f82cb9cb31140d87d3ce2a9ede3.67108864",
-		},
-		{
-			entries:    []string{"00001.8a034f82cb9cb31140d87d3ce2a9ede3.67108864", "fs.json", "00002.d73d8ab724016dfb051e2d3584495c54.32891137"},
-			partNumber: 2,
-			etag:       "d73d8ab724016dfb051e2d3584495c54",
-			result:     "00002.d73d8ab724016dfb051e2d3584495c54.32891137",
-		},
-		{
-			entries:    []string{"00001.8a034f82cb9cb31140d87d3ce2a9ede3.67108864", "fs.json", "00002.d73d8ab724016dfb051e2d3584495c54.32891137"},
-			partNumber: 1,
-			etag:       "d73d8ab724016dfb051e2d3584495c54",
-			result:     "",
-		},
+func BenchmarkGetPartFileWithTrie(b *testing.B) {
+	b.ResetTimer()
+
+	entriesTrie := trie.NewTrie()
+	for i := 1; i <= 10000; i++ {
+		entriesTrie.Insert(fmt.Sprintf("%.5d.8a034f82cb9cb31140d87d3ce2a9ede3.67108864", i))
 	}
-	for i, test := range testCases {
-		got := getPartFile(test.entries, test.partNumber, test.etag)
-		if got != test.result {
-			t.Errorf("Test %d - expected %s but received %s",
-				i+1, test.result, got)
+
+	for i := 1; i <= 10000; i++ {
+		partFile := getPartFile(entriesTrie, i, "8a034f82cb9cb31140d87d3ce2a9ede3")
+		if partFile == "" {
+			b.Fatal("partFile returned is empty")
 		}
 	}
+
+	b.ReportAllocs()
 }
 
 func TestGetActualSize(t *testing.T) {
@@ -427,7 +468,7 @@ func TestGetActualSize(t *testing.T) {
 	}{
 		{
 			objInfo: ObjectInfo{
-				UserDefined: map[string]string{"X-Minio-Internal-compression": "golang/snappy/LZ77",
+				UserDefined: map[string]string{"X-Minio-Internal-compression": "klauspost/compress/s2",
 					"X-Minio-Internal-actual-size": "100000001",
 					"content-type":                 "application/octet-stream",
 					"etag":                         "b3ff3ef3789147152fbfbc50efba4bfd-2"},
@@ -446,7 +487,7 @@ func TestGetActualSize(t *testing.T) {
 		},
 		{
 			objInfo: ObjectInfo{
-				UserDefined: map[string]string{"X-Minio-Internal-compression": "golang/snappy/LZ77",
+				UserDefined: map[string]string{"X-Minio-Internal-compression": "klauspost/compress/s2",
 					"X-Minio-Internal-actual-size": "841",
 					"content-type":                 "application/octet-stream",
 					"etag":                         "b3ff3ef3789147152fbfbc50efba4bfd-2"},
@@ -456,7 +497,7 @@ func TestGetActualSize(t *testing.T) {
 		},
 		{
 			objInfo: ObjectInfo{
-				UserDefined: map[string]string{"X-Minio-Internal-compression": "golang/snappy/LZ77",
+				UserDefined: map[string]string{"X-Minio-Internal-compression": "klauspost/compress/s2",
 					"content-type": "application/octet-stream",
 					"etag":         "b3ff3ef3789147152fbfbc50efba4bfd-2"},
 				Parts: []ObjectPartInfo{},
@@ -465,7 +506,7 @@ func TestGetActualSize(t *testing.T) {
 		},
 	}
 	for i, test := range testCases {
-		got := test.objInfo.GetActualSize()
+		got, _ := test.objInfo.GetActualSize()
 		if got != test.result {
 			t.Errorf("Test %d - expected %d but received %d",
 				i+1, test.result, got)
@@ -479,8 +520,9 @@ func TestGetCompressedOffsets(t *testing.T) {
 		offset            int64
 		startOffset       int64
 		snappyStartOffset int64
+		firstPart         int
 	}{
-		{
+		0: {
 			objInfo: ObjectInfo{
 				Parts: []ObjectPartInfo{
 					{
@@ -496,8 +538,9 @@ func TestGetCompressedOffsets(t *testing.T) {
 			offset:            79109865,
 			startOffset:       39235668,
 			snappyStartOffset: 12001001,
+			firstPart:         1,
 		},
-		{
+		1: {
 			objInfo: ObjectInfo{
 				Parts: []ObjectPartInfo{
 					{
@@ -514,7 +557,7 @@ func TestGetCompressedOffsets(t *testing.T) {
 			startOffset:       0,
 			snappyStartOffset: 19109865,
 		},
-		{
+		2: {
 			objInfo: ObjectInfo{
 				Parts: []ObjectPartInfo{
 					{
@@ -533,14 +576,74 @@ func TestGetCompressedOffsets(t *testing.T) {
 		},
 	}
 	for i, test := range testCases {
-		startOffset, snappyStartOffset := getCompressedOffsets(test.objInfo, test.offset)
+		startOffset, snappyStartOffset, firstPart := getCompressedOffsets(test.objInfo, test.offset)
 		if startOffset != test.startOffset {
 			t.Errorf("Test %d - expected startOffset %d but received %d",
-				i+1, test.startOffset, startOffset)
+				i, test.startOffset, startOffset)
 		}
 		if snappyStartOffset != test.snappyStartOffset {
 			t.Errorf("Test %d - expected snappyOffset %d but received %d",
-				i+1, test.snappyStartOffset, snappyStartOffset)
+				i, test.snappyStartOffset, snappyStartOffset)
 		}
+		if firstPart != test.firstPart {
+			t.Errorf("Test %d - expected firstPart %d but received %d",
+				i, test.firstPart, firstPart)
+		}
+	}
+}
+
+func TestS2CompressReader(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{name: "empty", data: nil},
+		{name: "small", data: []byte("hello, world")},
+		{name: "large", data: bytes.Repeat([]byte("hello, world"), 1000)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := make([]byte, 100) // make small buffer to ensure multiple reads are required for large case
+
+			r := newS2CompressReader(bytes.NewReader(tt.data), int64(len(tt.data)))
+			defer r.Close()
+
+			var rdrBuf bytes.Buffer
+			_, err := io.CopyBuffer(&rdrBuf, r, buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var stdBuf bytes.Buffer
+			w := s2.NewWriter(&stdBuf)
+			_, err = io.CopyBuffer(w, bytes.NewReader(tt.data), buf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = w.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var (
+				got  = rdrBuf.Bytes()
+				want = stdBuf.Bytes()
+			)
+			if !bytes.Equal(got, want) {
+				t.Errorf("encoded data does not match\n\t%q\n\t%q", got, want)
+			}
+
+			var decBuf bytes.Buffer
+			decRdr := s2.NewReader(&rdrBuf)
+			_, err = io.Copy(&decBuf, decRdr)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if !bytes.Equal(tt.data, decBuf.Bytes()) {
+				t.Errorf("roundtrip failed\n\t%q\n\t%q", tt.data, decBuf.Bytes())
+			}
+		})
 	}
 }

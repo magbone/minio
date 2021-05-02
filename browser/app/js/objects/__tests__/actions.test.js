@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,13 @@ import configureStore from "redux-mock-store"
 import thunk from "redux-thunk"
 import * as actionsObjects from "../actions"
 import * as alertActions from "../../alert/actions"
-import { minioBrowserPrefix } from "../../constants"
+import {
+  minioBrowserPrefix,
+  SORT_BY_NAME,
+  SORT_ORDER_ASC,
+  SORT_BY_LAST_MODIFIED,
+  SORT_ORDER_DESC
+} from "../../constants"
 import history from "../../history"
 
 jest.mock("../../web", () => ({
@@ -26,6 +32,7 @@ jest.mock("../../web", () => ({
     .fn(() => true)
     .mockReturnValueOnce(true)
     .mockReturnValueOnce(false)
+    .mockReturnValueOnce(true)
     .mockReturnValueOnce(true)
     .mockReturnValueOnce(true)
     .mockReturnValueOnce(false),
@@ -37,8 +44,6 @@ jest.mock("../../web", () => ({
     } else {
       return Promise.resolve({
         objects: [{ name: "test1" }, { name: "test2" }],
-        istruncated: false,
-        nextmarker: "test2",
         writable: false
       })
     }
@@ -66,6 +71,16 @@ jest.mock("../../web", () => ({
     .mockImplementationOnce(() => {
       return Promise.resolve({ token: "test" })
     })
+    .mockImplementationOnce(() => {
+      return Promise.resolve({ token: "test" })
+    }),
+  GetBucketPolicy: jest.fn(({ bucketName, prefix }) => {
+    if (!bucketName) {
+      return Promise.reject({ message: "Invalid bucket" })
+    }
+    if (bucketName === 'test-public') return Promise.resolve({ policy: 'readonly' })
+    return Promise.resolve({})
+  })
 }))
 
 const middlewares = [thunk]
@@ -77,17 +92,11 @@ describe("Objects actions", () => {
     const expectedActions = [
       {
         type: "objects/SET_LIST",
-        objects: [{ name: "test1" }, { name: "test2" }],
-        isTruncated: false,
-        marker: "test2"
+        objects: [{ name: "test1" }, { name: "test2" }]
       }
     ]
     store.dispatch(
-      actionsObjects.setList(
-        [{ name: "test1" }, { name: "test2" }],
-        "test2",
-        false
-      )
+      actionsObjects.setList([{ name: "test1" }, { name: "test2" }])
     )
     const actions = store.getActions()
     expect(actions).toEqual(expectedActions)
@@ -98,10 +107,10 @@ describe("Objects actions", () => {
     const expectedActions = [
       {
         type: "objects/SET_SORT_BY",
-        sortBy: "name"
+        sortBy: SORT_BY_NAME
       }
     ]
-    store.dispatch(actionsObjects.setSortBy("name"))
+    store.dispatch(actionsObjects.setSortBy(SORT_BY_NAME))
     const actions = store.getActions()
     expect(actions).toEqual(expectedActions)
   })
@@ -111,10 +120,10 @@ describe("Objects actions", () => {
     const expectedActions = [
       {
         type: "objects/SET_SORT_ORDER",
-        sortOrder: true
+        sortOrder: SORT_ORDER_ASC
       }
     ]
-    store.dispatch(actionsObjects.setSortOrder(true))
+    store.dispatch(actionsObjects.setSortOrder(SORT_ORDER_ASC))
     const actions = store.getActions()
     expect(actions).toEqual(expectedActions)
   })
@@ -126,48 +135,28 @@ describe("Objects actions", () => {
     })
     const expectedActions = [
       {
-        type: "objects/SET_LIST",
-        objects: [{ name: "test1" }, { name: "test2" }],
-        marker: "test2",
-        isTruncated: false
+        type: "objects/RESET_LIST"
       },
+      { listLoading: true, type: "objects/SET_LIST_LOADING" },
       {
         type: "objects/SET_SORT_BY",
-        sortBy: ""
+        sortBy: SORT_BY_LAST_MODIFIED
       },
       {
         type: "objects/SET_SORT_ORDER",
-        sortOrder: false
+        sortOrder: SORT_ORDER_DESC
+      },
+      {
+        type: "objects/SET_LIST",
+        objects: [{ name: "test2" }, { name: "test1" }]
       },
       {
         type: "objects/SET_PREFIX_WRITABLE",
         prefixWritable: false
-      }
+      },
+      { listLoading: false, type: "objects/SET_LIST_LOADING" }
     ]
     return store.dispatch(actionsObjects.fetchObjects()).then(() => {
-      const actions = store.getActions()
-      expect(actions).toEqual(expectedActions)
-    })
-  })
-
-  it("creates objects/APPEND_LIST after fetching more objects", () => {
-    const store = mockStore({
-      buckets: { currentBucket: "bk1" },
-      objects: { currentPrefix: "" }
-    })
-    const expectedActions = [
-      {
-        type: "objects/APPEND_LIST",
-        objects: [{ name: "test1" }, { name: "test2" }],
-        marker: "test2",
-        isTruncated: false
-      },
-      {
-        type: "objects/SET_PREFIX_WRITABLE",
-        prefixWritable: false
-      }
-    ]
-    return store.dispatch(actionsObjects.fetchObjects(true)).then(() => {
       const actions = store.getActions()
       expect(actions).toEqual(expectedActions)
     })
@@ -180,6 +169,10 @@ describe("Objects actions", () => {
     })
     const expectedActions = [
       {
+        type: "objects/RESET_LIST"
+      },
+      { listLoading: true, type: "objects/SET_LIST_LOADING" },
+      {
         type: "alert/SET",
         alert: {
           type: "danger",
@@ -189,8 +182,9 @@ describe("Objects actions", () => {
         }
       },
       {
-        type: "object/RESET_LIST"
-      }
+        type: "objects/RESET_LIST"
+      },
+      { listLoading: false, type: "objects/SET_LIST_LOADING" }
     ]
     return store.dispatch(actionsObjects.fetchObjects()).then(() => {
       const actions = store.getActions()
@@ -213,28 +207,24 @@ describe("Objects actions", () => {
       objects: {
         list: [],
         sortBy: "",
-        sortOrder: false,
-        isTruncated: false,
-        marker: ""
+        sortOrder: SORT_ORDER_ASC
       }
     })
     const expectedActions = [
       {
         type: "objects/SET_SORT_BY",
-        sortBy: "name"
+        sortBy: SORT_BY_NAME
       },
       {
         type: "objects/SET_SORT_ORDER",
-        sortOrder: true
+        sortOrder: SORT_ORDER_ASC
       },
       {
         type: "objects/SET_LIST",
-        objects: [],
-        isTruncated: false,
-        marker: ""
+        objects: []
       }
     ]
-    store.dispatch(actionsObjects.sortObjects("name"))
+    store.dispatch(actionsObjects.sortObjects(SORT_BY_NAME))
     const actions = store.getActions()
     expect(actions).toEqual(expectedActions)
   })
@@ -246,6 +236,10 @@ describe("Objects actions", () => {
     })
     const expectedActions = [
       { type: "objects/SET_CURRENT_PREFIX", prefix: "abc/" },
+      {
+        type: "objects/RESET_LIST"
+      },
+      { listLoading: true, type: "objects/SET_LIST_LOADING" },
       { type: "objects/CHECKED_LIST_RESET" }
     ]
     store.dispatch(actionsObjects.selectPrefix("abc/"))
@@ -312,7 +306,8 @@ describe("Objects actions", () => {
         type: "objects/SET_SHARE_OBJECT",
         show: true,
         object: "b.txt",
-        url: "test"
+        url: "test",
+        showExpiryDate: true
       }
     ]
     store.dispatch(actionsObjects.showShareObject("b.txt", "test"))
@@ -338,14 +333,16 @@ describe("Objects actions", () => {
   it("creates objects/SET_SHARE_OBJECT when object is shared", () => {
     const store = mockStore({
       buckets: { currentBucket: "bk1" },
-      objects: { currentPrefix: "pre1/" }
+      objects: { currentPrefix: "pre1/" },
+      browser: { serverInfo: {} },
     })
     const expectedActions = [
       {
         type: "objects/SET_SHARE_OBJECT",
         show: true,
         object: "a.txt",
-        url: "https://test.com/bk1/pre1/b.txt"
+        url: "https://test.com/bk1/pre1/b.txt",
+        showExpiryDate: true
       },
       {
         type: "alert/SET",
@@ -364,10 +361,42 @@ describe("Objects actions", () => {
       })
   })
 
+  it("creates objects/SET_SHARE_OBJECT when object is shared with public link", () => {
+    const store = mockStore({
+      buckets: { currentBucket: "test-public" },
+      objects: { currentPrefix: "pre1/" },
+      browser: { serverInfo: { info: { domains: ['public.com'] }} },
+    })
+    const expectedActions = [
+      {
+        type: "objects/SET_SHARE_OBJECT",
+        show: true,
+        object: "a.txt",
+        url: "public.com/test-public/pre1/a.txt",
+        showExpiryDate: false
+      },
+      {
+        type: "alert/SET",
+        alert: {
+          type: "success",
+          message: "Object shared.",
+          id: alertActions.alertId
+        }
+      }
+    ]
+    return store
+      .dispatch(actionsObjects.shareObject("a.txt", 1, 0, 0))
+      .then(() => {
+        const actions = store.getActions()
+        expect(actions).toEqual(expectedActions)
+      })
+  })
+
   it("creates alert/SET when shareObject is failed", () => {
     const store = mockStore({
       buckets: { currentBucket: "" },
-      objects: { currentPrefix: "pre1/" }
+      objects: { currentPrefix: "pre1/" },
+      browser: { serverInfo: {} },
     })
     const expectedActions = [
       {
@@ -456,6 +485,34 @@ describe("Objects actions", () => {
         const actions = store.getActions()
         expect(actions).toEqual(expectedActions)
       })
+    })
+  })
+
+  it("should download prefix", () => {
+    const open = jest.fn()
+    const send = jest.fn()
+    const xhrMockClass = () => ({
+      open: open,
+      send: send
+    })
+    window.XMLHttpRequest = jest.fn().mockImplementation(xhrMockClass)
+
+    const store = mockStore({
+      buckets: { currentBucket: "bk1" },
+      objects: { currentPrefix: "pre1/" }
+    })
+    return store.dispatch(actionsObjects.downloadPrefix("pre2/")).then(() => {
+      const requestUrl = `${
+        location.origin
+      }${minioBrowserPrefix}/zip?token=test`
+      expect(open).toHaveBeenCalledWith("POST", requestUrl, true)
+      expect(send).toHaveBeenCalledWith(
+        JSON.stringify({
+          bucketName: "bk1",
+          prefix: "pre1/",
+          objects: ["pre2/"]
+        })
+      )
     })
   })
 

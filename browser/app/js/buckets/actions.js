@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,19 +31,38 @@ export const SET_POLICIES = "buckets/SET_POLICIES"
 
 export const fetchBuckets = () => {
   return function(dispatch) {
+    const { bucket, prefix } = pathSlice(history.location.pathname)
     return web.ListBuckets().then(res => {
       const buckets = res.buckets ? res.buckets.map(bucket => bucket.name) : []
-      dispatch(setList(buckets))
       if (buckets.length > 0) {
-        const { bucket, prefix } = pathSlice(history.location.pathname)
+        dispatch(setList(buckets))
         if (bucket && buckets.indexOf(bucket) > -1) {
           dispatch(selectBucket(bucket, prefix))
         } else {
           dispatch(selectBucket(buckets[0]))
         }
       } else {
-        dispatch(selectBucket(""))
-        history.replace("/")
+        if (bucket) {
+          dispatch(setList([bucket]))
+          dispatch(selectBucket(bucket, prefix))
+        } else {
+          dispatch(selectBucket(""))
+          history.replace("/")
+        }
+      }
+    })
+    .catch(err => {
+      if (bucket && err.message === "Access Denied." || err.message.indexOf('Prefix access is denied') > -1 ) {
+        dispatch(setList([bucket]))
+        dispatch(selectBucket(bucket, prefix))
+      } else {
+        dispatch(
+          alertActions.set({
+            type: "danger",
+            message: err.message,
+            autoClear: true,
+          })
+        )
       }
     })
   }

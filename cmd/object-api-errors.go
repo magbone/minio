@@ -1,24 +1,28 @@
-/*
- * Minio Cloud Storage, (C) 2015, 2016, 2017, 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"path"
 )
 
 // Converts underlying storage error. Convenience function written to
@@ -27,67 +31,145 @@ import (
 func toObjectErr(err error, params ...string) error {
 	switch err {
 	case errVolumeNotFound:
+		apiErr := BucketNotFound{}
 		if len(params) >= 1 {
-			err = BucketNotFound{Bucket: params[0]}
+			apiErr.Bucket = params[0]
 		}
+		return apiErr
 	case errVolumeNotEmpty:
+		apiErr := BucketNotEmpty{}
 		if len(params) >= 1 {
-			err = BucketNotEmpty{Bucket: params[0]}
+			apiErr.Bucket = params[0]
 		}
+		return apiErr
 	case errVolumeExists:
+		apiErr := BucketExists{}
 		if len(params) >= 1 {
-			err = BucketExists{Bucket: params[0]}
+			apiErr.Bucket = params[0]
 		}
+		return apiErr
 	case errDiskFull:
-		err = StorageFull{}
+		return StorageFull{}
+	case errTooManyOpenFiles:
+		return SlowDown{}
 	case errFileAccessDenied:
-		if len(params) >= 2 {
-			err = PrefixAccessDenied{
-				Bucket: params[0],
-				Object: params[1],
-			}
+		apiErr := PrefixAccessDenied{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
 		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
+	case errFileParentIsFile:
+		apiErr := ParentIsObject{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
+		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
 	case errIsNotRegular:
-		if len(params) >= 2 {
-			err = ObjectExistsAsDirectory{
-				Bucket: params[0],
-				Object: params[1],
-			}
+		apiErr := ObjectExistsAsDirectory{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
 		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
+	case errFileVersionNotFound:
+		apiErr := VersionNotFound{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
+		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		if len(params) >= 3 {
+			apiErr.VersionID = params[2]
+		}
+		return apiErr
+	case errMethodNotAllowed:
+		apiErr := MethodNotAllowed{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
+		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
 	case errFileNotFound:
-		if len(params) >= 2 {
-			err = ObjectNotFound{
-				Bucket: params[0],
-				Object: params[1],
-			}
+		apiErr := ObjectNotFound{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
 		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
+	case errUploadIDNotFound:
+		apiErr := InvalidUploadID{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
+		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		if len(params) >= 3 {
+			apiErr.UploadID = params[2]
+		}
+		return apiErr
 	case errFileNameTooLong:
-		if len(params) >= 2 {
-			err = ObjectNameInvalid{
-				Bucket: params[0],
-				Object: params[1],
-			}
+		apiErr := ObjectNameInvalid{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
 		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
 	case errDataTooLarge:
-		if len(params) >= 2 {
-			err = ObjectTooLarge{
-				Bucket: params[0],
-				Object: params[1],
-			}
+		apiErr := ObjectTooLarge{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
 		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
 	case errDataTooSmall:
-		if len(params) >= 2 {
-			err = ObjectTooSmall{
-				Bucket: params[0],
-				Object: params[1],
-			}
+		apiErr := ObjectTooSmall{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
 		}
-	case errXLReadQuorum:
-		err = InsufficientReadQuorum{}
-	case errXLWriteQuorum:
-		err = InsufficientWriteQuorum{}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
+	case errErasureReadQuorum:
+		apiErr := InsufficientReadQuorum{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
+		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
+	case errErasureWriteQuorum:
+		apiErr := InsufficientWriteQuorum{}
+		if len(params) >= 1 {
+			apiErr.Bucket = params[0]
+		}
+		if len(params) >= 2 {
+			apiErr.Object = decodeDirObject(params[1])
+		}
+		return apiErr
 	case io.ErrUnexpectedEOF, io.ErrShortWrite:
-		err = IncompleteBody{}
+		return IncompleteBody{}
+	case context.Canceled, context.DeadlineExceeded:
+		return IncompleteBody{}
 	}
 	return err
 }
@@ -106,24 +188,58 @@ func (e StorageFull) Error() string {
 	return "Storage reached its minimum free disk threshold."
 }
 
+// SlowDown  too many file descriptors open or backend busy .
+type SlowDown struct{}
+
+func (e SlowDown) Error() string {
+	return "Please reduce your request rate"
+}
+
 // InsufficientReadQuorum storage cannot satisfy quorum for read operation.
-type InsufficientReadQuorum struct{}
+type InsufficientReadQuorum GenericError
 
 func (e InsufficientReadQuorum) Error() string {
-	return "Storage resources are insufficient for the read operation."
+	return "Storage resources are insufficient for the read operation " + e.Bucket + "/" + e.Object
+}
+
+// Unwrap the error.
+func (e InsufficientReadQuorum) Unwrap() error {
+	return errErasureReadQuorum
 }
 
 // InsufficientWriteQuorum storage cannot satisfy quorum for write operation.
-type InsufficientWriteQuorum struct{}
+type InsufficientWriteQuorum GenericError
 
 func (e InsufficientWriteQuorum) Error() string {
-	return "Storage resources are insufficient for the write operation."
+	return "Storage resources are insufficient for the write operation " + e.Bucket + "/" + e.Object
+}
+
+// Unwrap the error.
+func (e InsufficientWriteQuorum) Unwrap() error {
+	return errErasureWriteQuorum
 }
 
 // GenericError - generic object layer error.
 type GenericError struct {
-	Bucket string
-	Object string
+	Bucket    string
+	Object    string
+	VersionID string
+	Err       error
+}
+
+// Unwrap the error to its underlying error.
+func (e GenericError) Unwrap() error {
+	return e.Err
+}
+
+// InvalidArgument incorrect input argument
+type InvalidArgument GenericError
+
+func (e InvalidArgument) Error() string {
+	if e.Err != nil {
+		return "Invalid arguments provided for " + e.Bucket + "/" + e.Object + ": (" + e.Err.Error() + ")"
+	}
+	return "Invalid arguments provided for " + e.Bucket + "/" + e.Object
 }
 
 // BucketNotFound bucket does not exist.
@@ -154,18 +270,39 @@ func (e BucketNotEmpty) Error() string {
 	return "Bucket not empty: " + e.Bucket
 }
 
+// InvalidVersionID invalid version id
+type InvalidVersionID GenericError
+
+func (e InvalidVersionID) Error() string {
+	return "Invalid version id: " + e.Bucket + "/" + e.Object + "(" + e.VersionID + ")"
+}
+
+// VersionNotFound version does not exist.
+type VersionNotFound GenericError
+
+func (e VersionNotFound) Error() string {
+	return "Version not found: " + e.Bucket + "/" + e.Object + "(" + e.VersionID + ")"
+}
+
 // ObjectNotFound object does not exist.
 type ObjectNotFound GenericError
 
 func (e ObjectNotFound) Error() string {
-	return "Object not found: " + e.Bucket + "#" + e.Object
+	return "Object not found: " + e.Bucket + "/" + e.Object
+}
+
+// MethodNotAllowed on the object
+type MethodNotAllowed GenericError
+
+func (e MethodNotAllowed) Error() string {
+	return "Method not allowed: " + e.Bucket + "/" + e.Object
 }
 
 // ObjectAlreadyExists object already exists.
 type ObjectAlreadyExists GenericError
 
 func (e ObjectAlreadyExists) Error() string {
-	return "Object: " + e.Bucket + "#" + e.Object + " already exists"
+	return "Object: " + e.Bucket + "/" + e.Object + " already exists"
 }
 
 // ObjectExistsAsDirectory object already exists as a directory.
@@ -179,7 +316,14 @@ func (e ObjectExistsAsDirectory) Error() string {
 type PrefixAccessDenied GenericError
 
 func (e PrefixAccessDenied) Error() string {
-	return "Prefix access is denied: " + e.Bucket + "/" + e.Object
+	return "Prefix access is denied: " + e.Bucket + SlashSeparator + e.Object
+}
+
+// ParentIsObject object access is denied.
+type ParentIsObject GenericError
+
+func (e ParentIsObject) Error() string {
+	return "Parent is object " + e.Bucket + SlashSeparator + path.Dir(e.Object)
 }
 
 // BucketExists bucket exists.
@@ -187,15 +331,6 @@ type BucketExists GenericError
 
 func (e BucketExists) Error() string {
 	return "Bucket exists: " + e.Bucket
-}
-
-// UnsupportedDelimiter - unsupported delimiter.
-type UnsupportedDelimiter struct {
-	Delimiter string
-}
-
-func (e UnsupportedDelimiter) Error() string {
-	return fmt.Sprintf("delimiter '%s' is not supported. Only '/' is supported", e.Delimiter)
 }
 
 // InvalidUploadIDKeyCombination - invalid upload id and key marker combination.
@@ -220,7 +355,147 @@ func (e InvalidMarkerPrefixCombination) Error() string {
 type BucketPolicyNotFound GenericError
 
 func (e BucketPolicyNotFound) Error() string {
-	return "No bucket policy found for bucket: " + e.Bucket
+	return "No bucket policy configuration found for bucket: " + e.Bucket
+}
+
+// BucketLifecycleNotFound - no bucket lifecycle found.
+type BucketLifecycleNotFound GenericError
+
+func (e BucketLifecycleNotFound) Error() string {
+	return "No bucket lifecycle configuration found for bucket : " + e.Bucket
+}
+
+// BucketSSEConfigNotFound - no bucket encryption found
+type BucketSSEConfigNotFound GenericError
+
+func (e BucketSSEConfigNotFound) Error() string {
+	return "No bucket encryption configuration found for bucket: " + e.Bucket
+}
+
+// BucketTaggingNotFound - no bucket tags found
+type BucketTaggingNotFound GenericError
+
+func (e BucketTaggingNotFound) Error() string {
+	return "No bucket tags found for bucket: " + e.Bucket
+}
+
+// BucketObjectLockConfigNotFound - no bucket object lock config found
+type BucketObjectLockConfigNotFound GenericError
+
+func (e BucketObjectLockConfigNotFound) Error() string {
+	return "No bucket object lock configuration found for bucket: " + e.Bucket
+}
+
+// BucketQuotaConfigNotFound - no bucket quota config found.
+type BucketQuotaConfigNotFound GenericError
+
+func (e BucketQuotaConfigNotFound) Error() string {
+	return "No quota config found for bucket : " + e.Bucket
+}
+
+// BucketQuotaExceeded - bucket quota exceeded.
+type BucketQuotaExceeded GenericError
+
+func (e BucketQuotaExceeded) Error() string {
+	return "Bucket quota exceeded for bucket: " + e.Bucket
+}
+
+// BucketReplicationConfigNotFound - no bucket replication config found
+type BucketReplicationConfigNotFound GenericError
+
+func (e BucketReplicationConfigNotFound) Error() string {
+	return "The replication configuration was not found: " + e.Bucket
+}
+
+// BucketRemoteDestinationNotFound bucket does not exist.
+type BucketRemoteDestinationNotFound GenericError
+
+func (e BucketRemoteDestinationNotFound) Error() string {
+	return "Destination bucket does not exist: " + e.Bucket
+}
+
+// BucketReplicationDestinationMissingLock bucket does not have object lock enabled.
+type BucketReplicationDestinationMissingLock GenericError
+
+func (e BucketReplicationDestinationMissingLock) Error() string {
+	return "Destination bucket does not have object lock enabled: " + e.Bucket
+}
+
+// BucketRemoteTargetNotFound remote target does not exist.
+type BucketRemoteTargetNotFound GenericError
+
+func (e BucketRemoteTargetNotFound) Error() string {
+	return "Remote target not found: " + e.Bucket
+}
+
+// BucketRemoteConnectionErr remote target connection failure.
+type BucketRemoteConnectionErr GenericError
+
+func (e BucketRemoteConnectionErr) Error() string {
+	return fmt.Sprintf("Remote service endpoint or target bucket not available: %s \n\t%s", e.Bucket, e.Err.Error())
+}
+
+// BucketRemoteAlreadyExists remote already exists for this target type.
+type BucketRemoteAlreadyExists GenericError
+
+func (e BucketRemoteAlreadyExists) Error() string {
+	return "Remote already exists for this bucket: " + e.Bucket
+}
+
+// BucketRemoteLabelInUse remote already exists for this target label.
+type BucketRemoteLabelInUse GenericError
+
+func (e BucketRemoteLabelInUse) Error() string {
+	return "Remote with this label already exists for this bucket: " + e.Bucket
+}
+
+// BucketRemoteArnTypeInvalid arn type for remote is not valid.
+type BucketRemoteArnTypeInvalid GenericError
+
+func (e BucketRemoteArnTypeInvalid) Error() string {
+	return "Remote ARN type not valid: " + e.Bucket
+}
+
+// BucketRemoteArnInvalid arn needs to be specified.
+type BucketRemoteArnInvalid GenericError
+
+func (e BucketRemoteArnInvalid) Error() string {
+	return "Remote ARN has invalid format: " + e.Bucket
+}
+
+// BucketRemoteRemoveDisallowed when replication configuration exists
+type BucketRemoteRemoveDisallowed GenericError
+
+func (e BucketRemoteRemoveDisallowed) Error() string {
+	return "Replication configuration exists with this ARN:" + e.Bucket
+}
+
+// BucketRemoteTargetNotVersioned remote target does not have versioning enabled.
+type BucketRemoteTargetNotVersioned GenericError
+
+func (e BucketRemoteTargetNotVersioned) Error() string {
+	return "Remote target does not have versioning enabled: " + e.Bucket
+}
+
+// BucketReplicationSourceNotVersioned replication source does not have versioning enabled.
+type BucketReplicationSourceNotVersioned GenericError
+
+func (e BucketReplicationSourceNotVersioned) Error() string {
+	return "Replication source does not have versioning enabled: " + e.Bucket
+}
+
+// TransitionStorageClassNotFound remote tier not configured.
+type TransitionStorageClassNotFound GenericError
+
+func (e TransitionStorageClassNotFound) Error() string {
+	return "Transition storage class not found "
+}
+
+// InvalidObjectState restore-object doesn't apply for the current state of the object.
+type InvalidObjectState GenericError
+
+func (e InvalidObjectState) Error() string {
+	return "The operation is not valid for the current state of the object " + e.Bucket + "/" + e.Object + "(" + e.VersionID + ")"
 }
 
 /// Bucket related errors.
@@ -228,7 +503,7 @@ func (e BucketPolicyNotFound) Error() string {
 // BucketNameInvalid - bucketname provided is invalid.
 type BucketNameInvalid GenericError
 
-// Return string an error formatted as the given text.
+// Error returns string an error formatted as the given text.
 func (e BucketNameInvalid) Error() string {
 	return "Bucket name invalid: " + e.Bucket
 }
@@ -238,15 +513,31 @@ func (e BucketNameInvalid) Error() string {
 // ObjectNameInvalid - object name provided is invalid.
 type ObjectNameInvalid GenericError
 
-// Return string an error formatted as the given text.
+// ObjectNameTooLong - object name too long.
+type ObjectNameTooLong GenericError
+
+// ObjectNamePrefixAsSlash - object name has a slash as prefix.
+type ObjectNamePrefixAsSlash GenericError
+
+// Error returns string an error formatted as the given text.
 func (e ObjectNameInvalid) Error() string {
-	return "Object name invalid: " + e.Bucket + "#" + e.Object
+	return "Object name invalid: " + e.Bucket + "/" + e.Object
+}
+
+// Error returns string an error formatted as the given text.
+func (e ObjectNameTooLong) Error() string {
+	return "Object name too long: " + e.Bucket + "/" + e.Object
+}
+
+// Error returns string an error formatted as the given text.
+func (e ObjectNamePrefixAsSlash) Error() string {
+	return "Object name contains forward slash as pefix: " + e.Bucket + "/" + e.Object
 }
 
 // AllAccessDisabled All access to this object has been disabled
 type AllAccessDisabled GenericError
 
-// Return string an error formatted as the given text.
+// Error returns string an error formatted as the given text.
 func (e AllAccessDisabled) Error() string {
 	return "All access to this object has been disabled"
 }
@@ -254,9 +545,9 @@ func (e AllAccessDisabled) Error() string {
 // IncompleteBody You did not provide the number of bytes specified by the Content-Length HTTP header.
 type IncompleteBody GenericError
 
-// Return string an error formatted as the given text.
+// Error returns string an error formatted as the given text.
 func (e IncompleteBody) Error() string {
-	return e.Bucket + "#" + e.Object + "has incomplete body"
+	return e.Bucket + "/" + e.Object + "has incomplete body"
 }
 
 // InvalidRange - invalid range typed error.
@@ -286,11 +577,10 @@ func (e ObjectTooSmall) Error() string {
 
 // OperationTimedOut - a timeout occurred.
 type OperationTimedOut struct {
-	Path string
 }
 
 func (e OperationTimedOut) Error() string {
-	return "Operation timed out: " + e.Path
+	return "Operation timed out"
 }
 
 /// Multipart related errors.
@@ -306,6 +596,8 @@ func (e MalformedUploadID) Error() string {
 
 // InvalidUploadID invalid upload id.
 type InvalidUploadID struct {
+	Bucket   string
+	Object   string
 	UploadID string
 }
 
@@ -351,17 +643,12 @@ func (e InvalidETag) Error() string {
 }
 
 // NotImplemented If a feature is not implemented
-type NotImplemented struct{}
-
-func (e NotImplemented) Error() string {
-	return "Not Implemented"
+type NotImplemented struct {
+	Message string
 }
 
-// PolicyNesting - policy nesting conflict.
-type PolicyNesting struct{}
-
-func (e PolicyNesting) Error() string {
-	return "New bucket policy conflicts with an existing policy. Please try again with new prefix."
+func (e NotImplemented) Error() string {
+	return e.Message
 }
 
 // UnsupportedMetadata - unsupported metadata
@@ -378,8 +665,38 @@ func (e BackendDown) Error() string {
 	return "Backend down"
 }
 
+// isErrBucketNotFound - Check if error type is BucketNotFound.
+func isErrBucketNotFound(err error) bool {
+	var bkNotFound BucketNotFound
+	return errors.As(err, &bkNotFound)
+}
+
 // isErrObjectNotFound - Check if error type is ObjectNotFound.
 func isErrObjectNotFound(err error) bool {
-	_, ok := err.(ObjectNotFound)
+	var objNotFound ObjectNotFound
+	return errors.As(err, &objNotFound)
+}
+
+// isErrVersionNotFound - Check if error type is VersionNotFound.
+func isErrVersionNotFound(err error) bool {
+	var versionNotFound VersionNotFound
+	return errors.As(err, &versionNotFound)
+}
+
+// isErrSignatureDoesNotMatch - Check if error type is SignatureDoesNotMatch.
+func isErrSignatureDoesNotMatch(err error) bool {
+	var signatureDoesNotMatch SignatureDoesNotMatch
+	return errors.As(err, &signatureDoesNotMatch)
+}
+
+// PreConditionFailed - Check if copy precondition failed
+type PreConditionFailed struct{}
+
+func (e PreConditionFailed) Error() string {
+	return "At least one of the pre-conditions you specified did not hold"
+}
+
+func isErrPreconditionFailed(err error) bool {
+	_, ok := err.(PreConditionFailed)
 	return ok
 }

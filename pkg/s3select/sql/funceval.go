@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2019 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package sql
 
@@ -84,35 +85,35 @@ func (e *FuncExpr) getFunctionName() FuncName {
 
 // evalSQLFnNode assumes that the FuncExpr is not an aggregation
 // function.
-func (e *FuncExpr) evalSQLFnNode(r Record) (res *Value, err error) {
+func (e *FuncExpr) evalSQLFnNode(r Record, tableAlias string) (res *Value, err error) {
 	// Handle functions that have phrase arguments
 	switch e.getFunctionName() {
 	case sqlFnCast:
 		expr := e.Cast.Expr
-		res, err = expr.castTo(r, strings.ToUpper(e.Cast.CastType))
+		res, err = expr.castTo(r, strings.ToUpper(e.Cast.CastType), tableAlias)
 		return
 
 	case sqlFnSubstring:
-		return handleSQLSubstring(r, e.Substring)
+		return handleSQLSubstring(r, e.Substring, tableAlias)
 
 	case sqlFnExtract:
-		return handleSQLExtract(r, e.Extract)
+		return handleSQLExtract(r, e.Extract, tableAlias)
 
 	case sqlFnTrim:
-		return handleSQLTrim(r, e.Trim)
+		return handleSQLTrim(r, e.Trim, tableAlias)
 
 	case sqlFnDateAdd:
-		return handleDateAdd(r, e.DateAdd)
+		return handleDateAdd(r, e.DateAdd, tableAlias)
 
 	case sqlFnDateDiff:
-		return handleDateDiff(r, e.DateDiff)
+		return handleDateDiff(r, e.DateDiff, tableAlias)
 
 	}
 
 	// For all simple argument functions, we evaluate the arguments here
 	argVals := make([]*Value, len(e.SFunc.ArgsList))
 	for i, arg := range e.SFunc.ArgsList {
-		argVals[i], err = arg.evalNode(r)
+		argVals[i], err = arg.evalNode(r, tableAlias)
 		if err != nil {
 			return nil, err
 		}
@@ -173,7 +174,7 @@ func nullif(v1, v2 *Value) (res *Value, err error) {
 		return v1, nil
 	}
 
-	if v1.vType != v2.vType {
+	if v1.SameTypeAs(*v2) {
 		return v1, nil
 	}
 
@@ -196,7 +197,7 @@ func charlen(v *Value) (*Value, error) {
 		err := fmt.Errorf("%s/%s expects a string argument", sqlFnCharLength, sqlFnCharacterLength)
 		return nil, errIncorrectSQLFunctionArgumentType(err)
 	}
-	return FromInt(int64(len(s))), nil
+	return FromInt(int64(len([]rune(s)))), nil
 }
 
 func lowerCase(v *Value) (*Value, error) {
@@ -219,8 +220,8 @@ func upperCase(v *Value) (*Value, error) {
 	return FromString(strings.ToUpper(s)), nil
 }
 
-func handleDateAdd(r Record, d *DateAddFunc) (*Value, error) {
-	q, err := d.Quantity.evalNode(r)
+func handleDateAdd(r Record, d *DateAddFunc, tableAlias string) (*Value, error) {
+	q, err := d.Quantity.evalNode(r, tableAlias)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +231,7 @@ func handleDateAdd(r Record, d *DateAddFunc) (*Value, error) {
 		return nil, fmt.Errorf("QUANTITY must be a numeric argument to %s()", sqlFnDateAdd)
 	}
 
-	ts, err := d.Timestamp.evalNode(r)
+	ts, err := d.Timestamp.evalNode(r, tableAlias)
 	if err != nil {
 		return nil, err
 	}
@@ -245,8 +246,8 @@ func handleDateAdd(r Record, d *DateAddFunc) (*Value, error) {
 	return dateAdd(strings.ToUpper(d.DatePart), qty, t)
 }
 
-func handleDateDiff(r Record, d *DateDiffFunc) (*Value, error) {
-	tval1, err := d.Timestamp1.evalNode(r)
+func handleDateDiff(r Record, d *DateDiffFunc, tableAlias string) (*Value, error) {
+	tval1, err := d.Timestamp1.evalNode(r, tableAlias)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +259,7 @@ func handleDateDiff(r Record, d *DateDiffFunc) (*Value, error) {
 		return nil, fmt.Errorf("%s() expects two timestamp arguments", sqlFnDateDiff)
 	}
 
-	tval2, err := d.Timestamp2.evalNode(r)
+	tval2, err := d.Timestamp2.evalNode(r, tableAlias)
 	if err != nil {
 		return nil, err
 	}
@@ -277,12 +278,12 @@ func handleUTCNow() (*Value, error) {
 	return FromTimestamp(time.Now().UTC()), nil
 }
 
-func handleSQLSubstring(r Record, e *SubstringFunc) (val *Value, err error) {
+func handleSQLSubstring(r Record, e *SubstringFunc, tableAlias string) (val *Value, err error) {
 	// Both forms `SUBSTRING('abc' FROM 2 FOR 1)` and
 	// SUBSTRING('abc', 2, 1) are supported.
 
 	// Evaluate the string argument
-	v1, err := e.Expr.evalNode(r)
+	v1, err := e.Expr.evalNode(r, tableAlias)
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +302,7 @@ func handleSQLSubstring(r Record, e *SubstringFunc) (val *Value, err error) {
 	}
 
 	// Evaluate the FROM argument
-	v2, err := arg2.evalNode(r)
+	v2, err := arg2.evalNode(r, tableAlias)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +316,7 @@ func handleSQLSubstring(r Record, e *SubstringFunc) (val *Value, err error) {
 	length := -1
 	// Evaluate the optional FOR argument
 	if arg3 != nil {
-		v3, err := arg3.evalNode(r)
+		v3, err := arg3.evalNode(r, tableAlias)
 		if err != nil {
 			return nil, err
 		}
@@ -336,21 +337,26 @@ func handleSQLSubstring(r Record, e *SubstringFunc) (val *Value, err error) {
 	return FromString(res), err
 }
 
-func handleSQLTrim(r Record, e *TrimFunc) (res *Value, err error) {
-	charsV, cerr := e.TrimChars.evalNode(r)
-	if cerr != nil {
-		return nil, cerr
-	}
-	inferTypeAsString(charsV)
-	chars, ok := charsV.ToString()
-	if !ok {
-		return nil, errNonStringTrimArg
+func handleSQLTrim(r Record, e *TrimFunc, tableAlias string) (res *Value, err error) {
+	chars := ""
+	ok := false
+	if e.TrimChars != nil {
+		charsV, cerr := e.TrimChars.evalNode(r, tableAlias)
+		if cerr != nil {
+			return nil, cerr
+		}
+		inferTypeAsString(charsV)
+		chars, ok = charsV.ToString()
+		if !ok {
+			return nil, errNonStringTrimArg
+		}
 	}
 
-	fromV, ferr := e.TrimFrom.evalNode(r)
+	fromV, ferr := e.TrimFrom.evalNode(r, tableAlias)
 	if ferr != nil {
 		return nil, ferr
 	}
+	inferTypeAsString(fromV)
 	from, ok := fromV.ToString()
 	if !ok {
 		return nil, errNonStringTrimArg
@@ -363,8 +369,8 @@ func handleSQLTrim(r Record, e *TrimFunc) (res *Value, err error) {
 	return FromString(result), nil
 }
 
-func handleSQLExtract(r Record, e *ExtractFunc) (res *Value, err error) {
-	timeVal, verr := e.From.evalNode(r)
+func handleSQLExtract(r Record, e *ExtractFunc, tableAlias string) (res *Value, err error) {
+	timeVal, verr := e.From.evalNode(r, tableAlias)
 	if verr != nil {
 		return nil, verr
 	}
@@ -401,8 +407,8 @@ const (
 	castTimestamp = "TIMESTAMP"
 )
 
-func (e *Expression) castTo(r Record, castType string) (res *Value, err error) {
-	v, err := e.evalNode(r)
+func (e *Expression) castTo(r Record, castType string, tableAlias string) (res *Value, err error) {
+	v, err := e.evalNode(r, tableAlias)
 	if err != nil {
 		return nil, err
 	}
@@ -451,27 +457,28 @@ func intCast(v *Value) (int64, error) {
 		return 0, false
 	}
 
-	switch v.vType {
-	case typeFloat:
+	switch x := v.value.(type) {
+	case float64:
 		// Truncate fractional part
-		return int64(v.value.(float64)), nil
-	case typeInt:
-		return v.value.(int64), nil
-	case typeString:
+		return int64(x), nil
+	case int64:
+		return x, nil
+	case string:
 		// Parse as number, truncate floating point if
 		// needed.
-		s, _ := v.ToString()
-		res, ok := strToInt(s)
+		// String might contain trimming spaces, which
+		// needs to be trimmed.
+		res, ok := strToInt(strings.TrimSpace(x))
 		if !ok {
 			return 0, errCastFailure("could not parse as int")
 		}
 		return res, nil
-	case typeBytes:
+	case []byte:
 		// Parse as number, truncate floating point if
 		// needed.
-		b, _ := v.ToBytes()
-		s := string(b)
-		res, ok := strToInt(s)
+		// String might contain trimming spaces, which
+		// needs to be trimmed.
+		res, ok := strToInt(strings.TrimSpace(string(x)))
 		if !ok {
 			return 0, errCastFailure("could not parse as int")
 		}
@@ -483,20 +490,19 @@ func intCast(v *Value) (int64, error) {
 }
 
 func floatCast(v *Value) (float64, error) {
-	switch v.vType {
-	case typeFloat:
-		return v.value.(float64), nil
-	case typeInt:
-		return float64(v.value.(int64)), nil
-	case typeString:
-		f, err := strconv.ParseFloat(v.value.(string), 64)
+	switch x := v.value.(type) {
+	case float64:
+		return x, nil
+	case int64:
+		return float64(x), nil
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
 		if err != nil {
 			return 0, errCastFailure("could not parse as float")
 		}
 		return f, nil
-	case typeBytes:
-		b, _ := v.ToBytes()
-		f, err := strconv.ParseFloat(string(b), 64)
+	case []byte:
+		f, err := strconv.ParseFloat(strings.TrimSpace(string(x)), 64)
 		if err != nil {
 			return 0, errCastFailure("could not parse as float")
 		}
@@ -507,41 +513,33 @@ func floatCast(v *Value) (float64, error) {
 }
 
 func stringCast(v *Value) (string, error) {
-	switch v.vType {
-	case typeFloat:
-		f, _ := v.ToFloat()
-		return fmt.Sprintf("%v", f), nil
-	case typeInt:
-		i, _ := v.ToInt()
-		return fmt.Sprintf("%v", i), nil
-	case typeString:
-		s, _ := v.ToString()
-		return s, nil
-	case typeBytes:
-		b, _ := v.ToBytes()
-		return string(b), nil
-	case typeBool:
-		b, _ := v.ToBool()
-		return fmt.Sprintf("%v", b), nil
-	case typeNull:
+	switch x := v.value.(type) {
+	case float64:
+		return fmt.Sprintf("%v", x), nil
+	case int64:
+		return fmt.Sprintf("%v", x), nil
+	case string:
+		return x, nil
+	case []byte:
+		return string(x), nil
+	case bool:
+		return fmt.Sprintf("%v", x), nil
+	case nil:
 		// FIXME: verify this case is correct
-		return fmt.Sprintf("NULL"), nil
+		return "NULL", nil
 	}
 	// This does not happen
-	return "", nil
+	return "", errCastFailure(fmt.Sprintf("cannot cast %v to string type", v.GetTypeString()))
 }
 
 func timestampCast(v *Value) (t time.Time, _ error) {
-	switch v.vType {
-	case typeString:
-		s, _ := v.ToString()
-		return parseSQLTimestamp(s)
-	case typeBytes:
-		b, _ := v.ToBytes()
-		return parseSQLTimestamp(string(b))
-	case typeTimestamp:
-		t, _ = v.ToTimestamp()
-		return t, nil
+	switch x := v.value.(type) {
+	case string:
+		return parseSQLTimestamp(x)
+	case []byte:
+		return parseSQLTimestamp(string(x))
+	case time.Time:
+		return x, nil
 	default:
 		return t, errCastFailure(fmt.Sprintf("cannot cast %v to Timestamp type", v.GetTypeString()))
 	}
@@ -549,24 +547,22 @@ func timestampCast(v *Value) (t time.Time, _ error) {
 
 func boolCast(v *Value) (b bool, _ error) {
 	sToB := func(s string) (bool, error) {
-		if s == "true" {
+		switch s {
+		case "true":
 			return true, nil
-		} else if s == "false" {
+		case "false":
 			return false, nil
-		} else {
+		default:
 			return false, errCastFailure("cannot cast to Bool")
 		}
 	}
-	switch v.vType {
-	case typeBool:
-		b, _ := v.ToBool()
-		return b, nil
-	case typeString:
-		s, _ := v.ToString()
-		return sToB(strings.ToLower(s))
-	case typeBytes:
-		b, _ := v.ToBytes()
-		return sToB(strings.ToLower(string(b)))
+	switch x := v.value.(type) {
+	case bool:
+		return x, nil
+	case string:
+		return sToB(strings.ToLower(x))
+	case []byte:
+		return sToB(strings.ToLower(string(x)))
 	default:
 		return false, errCastFailure("cannot cast %v to Bool")
 	}

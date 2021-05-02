@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage, (C) 2017 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -28,7 +28,7 @@ import (
 	"cloud.google.com/go/storage"
 	"google.golang.org/api/googleapi"
 
-	miniogo "github.com/minio/minio-go"
+	miniogo "github.com/minio/minio-go/v7"
 	minio "github.com/minio/minio/cmd"
 )
 
@@ -478,7 +478,7 @@ func TestGCSAttrsToObjectInfo(t *testing.T) {
 	if objInfo.Bucket != attrs.Bucket {
 		t.Fatalf("Test failed with Bucket mistmatch, expected %s, got %s", attrs.Bucket, objInfo.Bucket)
 	}
-	if objInfo.ModTime != attrs.Updated {
+	if !objInfo.ModTime.Equal(attrs.Updated) {
 		t.Fatalf("Test failed with ModTime mistmatch, expected %s, got %s", attrs.Updated, objInfo.ModTime)
 	}
 	if objInfo.Size != attrs.Size {

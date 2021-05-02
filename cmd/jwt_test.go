@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -21,6 +22,7 @@ import (
 	"os"
 	"testing"
 
+	xjwt "github.com/minio/minio/cmd/jwt"
 	"github.com/minio/minio/pkg/auth"
 )
 
@@ -38,7 +40,8 @@ func testAuthenticate(authType string, t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error getting new credentials: %s", err)
 	}
-	globalServerConfig.SetCredential(cred)
+
+	globalActiveCred = cred
 
 	// Define test cases.
 	testCases := []struct {
@@ -61,9 +64,7 @@ func testAuthenticate(authType string, t *testing.T) {
 	// Run tests.
 	for _, testCase := range testCases {
 		var err error
-		if authType == "node" {
-			_, err = authenticateNode(testCase.accessKey, testCase.secretKey)
-		} else if authType == "web" {
+		if authType == "web" {
 			_, err = authenticateWeb(testCase.accessKey, testCase.secretKey)
 		} else if authType == "url" {
 			_, err = authenticateURL(testCase.accessKey, testCase.secretKey)
@@ -80,10 +81,6 @@ func testAuthenticate(authType string, t *testing.T) {
 			t.Fatalf("%+v: expected: <nil>, got: %s", testCase, err)
 		}
 	}
-}
-
-func TestAuthenticateNode(t *testing.T) {
-	testAuthenticate("node", t)
 }
 
 func TestAuthenticateWeb(t *testing.T) {
@@ -105,7 +102,7 @@ func TestWebRequestAuthenticate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	creds := globalServerConfig.GetCredential()
+	creds := globalActiveCred
 	token, err := getTokenString(creds.AccessKey, creds.SecretKey)
 	if err != nil {
 		t.Fatalf("unable get token %s", err)
@@ -149,6 +146,64 @@ func TestWebRequestAuthenticate(t *testing.T) {
 	}
 }
 
+func BenchmarkParseJWTStandardClaims(b *testing.B) {
+	obj, fsDir, err := prepareFS()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer os.RemoveAll(fsDir)
+	if err = newTestConfig(globalMinioDefaultRegion, obj); err != nil {
+		b.Fatal(err)
+	}
+
+	creds := globalActiveCred
+	token, err := authenticateNode(creds.AccessKey, creds.SecretKey, "")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			err = xjwt.ParseWithStandardClaims(token, xjwt.NewStandardClaims(), []byte(creds.SecretKey))
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+func BenchmarkParseJWTMapClaims(b *testing.B) {
+	obj, fsDir, err := prepareFS()
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer os.RemoveAll(fsDir)
+	if err = newTestConfig(globalMinioDefaultRegion, obj); err != nil {
+		b.Fatal(err)
+	}
+
+	creds := globalActiveCred
+	token, err := authenticateNode(creds.AccessKey, creds.SecretKey, "")
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			err = xjwt.ParseWithClaims(token, xjwt.NewMapClaims(), func(*xjwt.MapClaims) ([]byte, error) {
+				return []byte(creds.SecretKey), nil
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func BenchmarkAuthenticateNode(b *testing.B) {
 	obj, fsDir, err := prepareFS()
 	if err != nil {
@@ -159,11 +214,11 @@ func BenchmarkAuthenticateNode(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	creds := globalServerConfig.GetCredential()
+	creds := globalActiveCred
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		authenticateNode(creds.AccessKey, creds.SecretKey)
+		authenticateNode(creds.AccessKey, creds.SecretKey, "")
 	}
 }
 
@@ -177,7 +232,7 @@ func BenchmarkAuthenticateWeb(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	creds := globalServerConfig.GetCredential()
+	creds := globalActiveCred
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {

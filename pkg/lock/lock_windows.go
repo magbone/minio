@@ -1,20 +1,21 @@
 // +build windows
 
-/*
- * Minio Cloud Storage, (C) 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package lock
 
@@ -24,10 +25,12 @@ import (
 	"path/filepath"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 var (
-	modkernel32    = syscall.NewLazyDLL("kernel32.dll")
+	modkernel32    = windows.NewLazySystemDLL("kernel32.dll")
 	procLockFileEx = modkernel32.NewProc("LockFileEx")
 )
 
@@ -80,6 +83,7 @@ func TryLockedOpenFile(path string, flag int, perm os.FileMode) (*LockedFile, er
 	switch flag {
 	case syscall.O_RDONLY:
 		// https://docs.microsoft.com/en-us/windows/desktop/api/fileapi/nf-fileapi-lockfileex
+		//lint:ignore SA4016 Reasons
 		lockType = lockFileFailImmediately | 0 // Set this to enable shared lock and fail immediately.
 	}
 	return lockedOpenFile(path, flag, perm, lockType)

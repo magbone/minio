@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -138,9 +138,10 @@ describe("Uploads actions", () => {
         objects: { currentPrefix: "pre1/" }
       })
       store.dispatch(uploadsActions.uploadFile(file))
+      const objectPath = encodeURIComponent("pre1/file1")
       expect(open).toHaveBeenCalledWith(
         "PUT",
-        "https://localhost:8080/upload/test1/pre1/file1",
+        "https://localhost:8080/upload/test1/" + objectPath,
         true
       )
       expect(send).toHaveBeenCalledWith(file)

@@ -1,25 +1,27 @@
 // +build ignore
 
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
@@ -29,8 +31,8 @@ import (
 	"net/url"
 	"strings"
 
-	minio "github.com/minio/minio-go"
-	"github.com/minio/minio-go/pkg/credentials"
+	minio "github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 // JWTToken - parses the output from IDP access token.
@@ -48,7 +50,7 @@ var (
 
 func init() {
 	flag.StringVar(&stsEndpoint, "sts-ep", "http://localhost:9000", "STS endpoint")
-	flag.StringVar(&idpEndpoint, "idp-ep", "https://localhost:9443/oauth2/token", "IDP endpoint")
+	flag.StringVar(&idpEndpoint, "idp-ep", "http://localhost:8080/auth/realms/minio/protocol/openid-connect/token", "IDP token endpoint")
 	flag.StringVar(&clientID, "cid", "", "Client ID")
 	flag.StringVar(&clientSecret, "csec", "", "Client secret")
 }
@@ -99,7 +101,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Uncommend this to use Minio API operations by initializing minio
+	// Uncomment this to use MinIO API operations by initializing minio
 	// client with obtained credentials.
 
 	opts := &minio.Options{
@@ -112,13 +114,13 @@ func main() {
 		log.Fatal(err)
 	}
 
-	clnt, err := minio.NewWithOptions(u.Host, opts)
+	clnt, err := minio.New(u.Host, opts)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	d := bytes.NewReader([]byte("Hello, World"))
-	n, err := clnt.PutObject("my-bucketname", "my-objectname", d, d.Size(), minio.PutObjectOptions{})
+	n, err := clnt.PutObject(context.Background(), "my-bucketname", "my-objectname", d, d.Size(), minio.PutObjectOptions{})
 	if err != nil {
 		log.Fatalln(err)
 	}

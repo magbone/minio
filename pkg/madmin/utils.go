@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2016 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package madmin
 
@@ -25,17 +26,15 @@ import (
 	"net/url"
 	"strings"
 
-	sha256 "github.com/minio/sha256-simd"
-
-	"github.com/minio/minio-go/pkg/s3utils"
+	"github.com/minio/minio-go/v7/pkg/s3utils"
 )
 
-// sum256 calculate sha256 sum for an input byte array.
-func sum256(data []byte) []byte {
-	hash := sha256.New()
-	hash.Write(data)
-	return hash.Sum(nil)
-}
+// AdminAPIVersion - admin api version used in the request.
+const (
+	AdminAPIVersion   = "v3"
+	AdminAPIVersionV2 = "v2"
+	adminAPIPrefix    = "/" + AdminAPIVersion
+)
 
 // jsonDecoder decode json to go type.
 func jsonDecoder(body io.Reader, v interface{}) error {
@@ -60,10 +59,20 @@ func getEndpointURL(endpoint string, secure bool) (*url.URL, error) {
 			return nil, ErrInvalidArgument(msg)
 		}
 	}
+
 	// If secure is false, use 'http' scheme.
 	scheme := "https"
 	if !secure {
 		scheme = "http"
+	}
+
+	// Strip the obvious :443 and :80 from the endpoint
+	// to avoid the signature mismatch error.
+	if secure && strings.HasSuffix(endpoint, ":443") {
+		endpoint = strings.TrimSuffix(endpoint, ":443")
+	}
+	if !secure && strings.HasSuffix(endpoint, ":80") {
+		endpoint = strings.TrimSuffix(endpoint, ":80")
 	}
 
 	// Construct a secured endpoint URL.

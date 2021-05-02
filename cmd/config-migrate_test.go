@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -21,6 +22,8 @@ import (
 	"io/ioutil"
 	"os"
 	"testing"
+
+	"github.com/minio/minio/cmd/config"
 )
 
 // Test if config v1 is purged
@@ -58,7 +61,7 @@ func TestServerConfigMigrateV1(t *testing.T) {
 	}
 
 	// Check if config v1 is removed from filesystem
-	if _, err := os.Stat(configPath); err == nil || !os.IsNotExist(err) {
+	if _, err := os.Stat(configPath); err == nil || !osIsNotExist(err) {
 		t.Fatal("Config V1 file is not purged")
 	}
 
@@ -175,7 +178,7 @@ func TestServerConfigMigrateV2toV33(t *testing.T) {
 	}
 	defer os.RemoveAll(fsDir)
 
-	configPath := rootPath + "/" + minioConfigFile
+	configPath := rootPath + SlashSeparator + minioConfigFile
 
 	// Create a corrupted config file
 	if err := ioutil.WriteFile(configPath, []byte("{ \"version\":\"2\","), 0644); err != nil {
@@ -208,24 +211,24 @@ func TestServerConfigMigrateV2toV33(t *testing.T) {
 		t.Fatal("Unexpected error: ", err)
 	}
 
+	if err := migrateMinioSysConfigToKV(objLayer); err != nil {
+		t.Fatal("Unexpected error: ", err)
+	}
+
 	// Initialize server config and check again if everything is fine
 	if err := loadConfig(objLayer); err != nil {
 		t.Fatalf("Unable to initialize from updated config file %s", err)
 	}
 
-	// Check the version number in the upgraded config file
-	expectedVersion := serverConfigVersion
-	if globalServerConfig.Version != expectedVersion {
-		t.Fatalf("Expect version "+expectedVersion+", found: %v", globalServerConfig.Version)
-	}
-
 	// Check if accessKey and secretKey are not altered during migration
-	if globalServerConfig.Credential.AccessKey != accessKey {
-		t.Fatalf("Access key lost during migration, expected: %v, found:%v", accessKey, globalServerConfig.Credential.AccessKey)
+	caccessKey := globalServerConfig[config.CredentialsSubSys][config.Default].Get(config.AccessKey)
+	if caccessKey != accessKey {
+		t.Fatalf("Access key lost during migration, expected: %v, found:%v", accessKey, caccessKey)
 	}
 
-	if globalServerConfig.Credential.SecretKey != secretKey {
-		t.Fatalf("Secret key lost during migration, expected: %v, found: %v", secretKey, globalServerConfig.Credential.SecretKey)
+	csecretKey := globalServerConfig[config.CredentialsSubSys][config.Default].Get(config.SecretKey)
+	if csecretKey != secretKey {
+		t.Fatalf("Secret key lost during migration, expected: %v, found: %v", secretKey, csecretKey)
 	}
 }
 
@@ -238,7 +241,7 @@ func TestServerConfigMigrateFaultyConfig(t *testing.T) {
 	defer os.RemoveAll(rootPath)
 
 	globalConfigDir = &ConfigDir{path: rootPath}
-	configPath := rootPath + "/" + minioConfigFile
+	configPath := rootPath + SlashSeparator + minioConfigFile
 
 	// Create a corrupted config file
 	if err := ioutil.WriteFile(configPath, []byte("{ \"version\":\"2\", \"test\":"), 0644); err != nil {
@@ -335,7 +338,7 @@ func TestServerConfigMigrateCorruptedConfig(t *testing.T) {
 	defer os.RemoveAll(rootPath)
 
 	globalConfigDir = &ConfigDir{path: rootPath}
-	configPath := rootPath + "/" + minioConfigFile
+	configPath := rootPath + SlashSeparator + minioConfigFile
 
 	for i := 3; i <= 17; i++ {
 		// Create a corrupted config file

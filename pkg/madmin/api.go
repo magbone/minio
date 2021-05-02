@@ -1,47 +1,58 @@
-/*
- * Minio Cloud Storage, (C) 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package madmin
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
+	"time"
 
-	"github.com/minio/minio-go/pkg/s3signer"
-	"github.com/minio/minio-go/pkg/s3utils"
+	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/minio/minio-go/v7/pkg/s3utils"
+	"github.com/minio/minio-go/v7/pkg/signer"
+	"golang.org/x/net/publicsuffix"
 )
 
 // AdminClient implements Amazon S3 compatible methods.
 type AdminClient struct {
 	///  Standard options.
 
-	// AccessKeyID required for authorized requests.
-	accessKeyID string
-	// SecretAccessKey required for authorized requests.
-	secretAccessKey string
+	// Parsed endpoint url provided by the user.
+	endpointURL *url.URL
+
+	// Holds various credential providers.
+	credsProvider *credentials.Credentials
 
 	// User supplied.
 	appInfo struct {
@@ -49,13 +60,13 @@ type AdminClient struct {
 		appVersion string
 	}
 
-	endpointURL url.URL
-
 	// Indicate whether we are using https or not
 	secure bool
 
 	// Needs allocation.
 	httpClient *http.Client
+
+	random *rand.Rand
 
 	// Advanced functionality.
 	isTraceEnabled bool
@@ -73,41 +84,72 @@ const (
 // User Agent should always following the below style.
 // Please open an issue to discuss any new changes here.
 //
-//       Minio (OS; ARCH) LIB/VER APP/VER
+//       MinIO (OS; ARCH) LIB/VER APP/VER
 const (
-	libraryUserAgentPrefix = "Minio (" + runtime.GOOS + "; " + runtime.GOARCH + ") "
+	libraryUserAgentPrefix = "MinIO (" + runtime.GOOS + "; " + runtime.GOARCH + ") "
 	libraryUserAgent       = libraryUserAgentPrefix + libraryName + "/" + libraryVersion
 )
 
-// New - instantiate minio client Client, adds automatic verification of signature.
+// Options for New method
+type Options struct {
+	Creds  *credentials.Credentials
+	Secure bool
+	// Add future fields here
+}
+
+// New - instantiate minio admin client
 func New(endpoint string, accessKeyID, secretAccessKey string, secure bool) (*AdminClient, error) {
-	clnt, err := privateNew(endpoint, accessKeyID, secretAccessKey, secure)
+	creds := credentials.NewStaticV4(accessKeyID, secretAccessKey, "")
+
+	clnt, err := privateNew(endpoint, creds, secure)
 	if err != nil {
 		return nil, err
 	}
 	return clnt, nil
 }
 
-func privateNew(endpoint, accessKeyID, secretAccessKey string, secure bool) (*AdminClient, error) {
+// NewWithOptions - instantiate minio admin client with options.
+func NewWithOptions(endpoint string, opts *Options) (*AdminClient, error) {
+	clnt, err := privateNew(endpoint, opts.Creds, opts.Secure)
+	if err != nil {
+		return nil, err
+	}
+	return clnt, nil
+}
+
+func privateNew(endpoint string, creds *credentials.Credentials, secure bool) (*AdminClient, error) {
+	// Initialize cookies to preserve server sent cookies if any and replay
+	// them upon each request.
+	jar, err := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
+	if err != nil {
+		return nil, err
+	}
+
 	// construct endpoint.
 	endpointURL, err := getEndpointURL(endpoint, secure)
 	if err != nil {
 		return nil, err
 	}
 
-	// instantiate new Client.
-	clnt := &AdminClient{
-		accessKeyID:     accessKeyID,
-		secretAccessKey: secretAccessKey,
-		// Remember whether we are using https or not
-		secure: secure,
-		// Save endpoint URL, user agent for future uses.
-		endpointURL: *endpointURL,
-		// Instantiate http client and bucket location cache.
-		httpClient: &http.Client{
-			Transport: http.DefaultTransport,
-		},
+	clnt := new(AdminClient)
+
+	// Save the credentials.
+	clnt.credsProvider = creds
+
+	// Remember whether we are using https or not
+	clnt.secure = secure
+
+	// Save endpoint URL, user agent for future uses.
+	clnt.endpointURL = endpointURL
+
+	// Instantiate http client and bucket location cache.
+	clnt.httpClient = &http.Client{
+		Jar:       jar,
+		Transport: DefaultTransport(secure),
 	}
+
+	// Add locked pseudo-random number generator.
+	clnt.random = rand.New(&lockedRandSource{src: rand.NewSource(time.Now().UTC().UnixNano())})
 
 	// Return.
 	return clnt, nil
@@ -257,35 +299,19 @@ func (adm AdminClient) dumpHTTP(req *http.Request, resp *http.Response) error {
 
 // do - execute http request.
 func (adm AdminClient) do(req *http.Request) (*http.Response, error) {
-	var resp *http.Response
-	var err error
-	// Do the request in a loop in case of 307 http is met since golang still doesn't
-	// handle properly this situation (https://github.com/golang/go/issues/7912)
-	for {
-		resp, err = adm.httpClient.Do(req)
-		if err != nil {
-			// Handle this specifically for now until future Golang
-			// versions fix this issue properly.
-			urlErr, ok := err.(*url.Error)
-			if ok && strings.Contains(urlErr.Err.Error(), "EOF") {
+	resp, err := adm.httpClient.Do(req)
+	if err != nil {
+		// Handle this specifically for now until future Golang versions fix this issue properly.
+		if urlErr, ok := err.(*url.Error); ok {
+			if strings.Contains(urlErr.Err.Error(), "EOF") {
 				return nil, &url.Error{
 					Op:  urlErr.Op,
 					URL: urlErr.URL,
-					Err: fmt.Errorf("Connection closed by foreign host %s", urlErr.URL),
+					Err: errors.New("Connection closed by foreign host " + urlErr.URL + ". Retry again."),
 				}
 			}
-			return nil, err
 		}
-		// Redo the request with the new redirect url if http 307 is returned, quit the loop otherwise
-		if resp != nil && resp.StatusCode == http.StatusTemporaryRedirect {
-			newURL, uErr := url.Parse(resp.Header.Get("Location"))
-			if uErr != nil {
-				break
-			}
-			req.URL = newURL
-		} else {
-			break
-		}
+		return nil, err
 	}
 
 	// Response cannot be non-nil, report if its the case.
@@ -314,46 +340,86 @@ var successStatus = []int{
 // executeMethod - instantiates a given method, and retries the
 // request upon any error up to maxRetries attempts in a binomially
 // delayed manner using a standard back off algorithm.
-func (adm AdminClient) executeMethod(method string, reqData requestData) (res *http.Response, err error) {
+func (adm AdminClient) executeMethod(ctx context.Context, method string, reqData requestData) (res *http.Response, err error) {
+	var reqRetry = MaxRetry // Indicates how many times we can retry the request
+	defer func() {
+		if err != nil {
+			// close idle connections before returning, upon error.
+			adm.httpClient.CloseIdleConnections()
+		}
+	}()
 
-	// Create a done channel to control 'ListObjects' go routine.
-	doneCh := make(chan struct{}, 1)
+	// Create cancel context to control 'newRetryTimer' go routine.
+	retryCtx, cancel := context.WithCancel(ctx)
 
 	// Indicate to our routine to exit cleanly upon return.
-	defer close(doneCh)
+	defer cancel()
 
-	// Instantiate a new request.
-	var req *http.Request
-	req, err = adm.newRequest(method, reqData)
-	if err != nil {
-		return nil, err
-	}
-
-	// Initiate the request.
-	res, err = adm.do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	// For any known successful http status, return quickly.
-	for _, httpStatus := range successStatus {
-		if httpStatus == res.StatusCode {
-			return res, nil
+	for range adm.newRetryTimer(retryCtx, reqRetry, DefaultRetryUnit, DefaultRetryCap, MaxJitter) {
+		// Instantiate a new request.
+		var req *http.Request
+		req, err = adm.newRequest(ctx, method, reqData)
+		if err != nil {
+			return nil, err
 		}
+
+		// Initiate the request.
+		res, err = adm.do(req)
+		if err != nil {
+			// Give up right away if it is a connection refused problem
+			if errors.Is(err, syscall.ECONNREFUSED) {
+				return nil, err
+			}
+			if err == context.Canceled || err == context.DeadlineExceeded {
+				return nil, err
+			}
+			// retry all network errors.
+			continue
+		}
+
+		// For any known successful http status, return quickly.
+		for _, httpStatus := range successStatus {
+			if httpStatus == res.StatusCode {
+				return res, nil
+			}
+		}
+
+		// Read the body to be saved later.
+		errBodyBytes, err := ioutil.ReadAll(res.Body)
+		// res.Body should be closed
+		closeResponse(res)
+		if err != nil {
+			return nil, err
+		}
+
+		// Save the body.
+		errBodySeeker := bytes.NewReader(errBodyBytes)
+		res.Body = ioutil.NopCloser(errBodySeeker)
+
+		// For errors verify if its retryable otherwise fail quickly.
+		errResponse := ToErrorResponse(httpRespToErrorResponse(res))
+
+		// Save the body back again.
+		errBodySeeker.Seek(0, 0) // Seek back to starting point.
+		res.Body = ioutil.NopCloser(errBodySeeker)
+
+		// Verify if error response code is retryable.
+		if isS3CodeRetryable(errResponse.Code) {
+			continue // Retry.
+		}
+
+		// Verify if http status code is retryable.
+		if isHTTPStatusRetryable(res.StatusCode) {
+			continue // Retry.
+		}
+
+		break
 	}
 
-	// Read the body to be saved later.
-	errBodyBytes, err := ioutil.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
+	// Return an error when retry is canceled or deadlined
+	if e := retryCtx.Err(); e != nil {
+		return nil, e
 	}
-	// Save the body.
-	errBodySeeker := bytes.NewReader(errBodyBytes)
-	res.Body = ioutil.NopCloser(errBodySeeker)
-
-	// Save the body back again.
-	errBodySeeker.Seek(0, 0) // Seek back to starting point.
-	res.Body = ioutil.NopCloser(errBodySeeker)
 
 	return res, err
 }
@@ -366,8 +432,18 @@ func (adm AdminClient) setUserAgent(req *http.Request) {
 	}
 }
 
+func (adm AdminClient) getSecretKey() string {
+	value, err := adm.credsProvider.Get()
+	if err != nil {
+		// Return empty, call will fail.
+		return ""
+	}
+
+	return value.SecretAccessKey
+}
+
 // newRequest - instantiate a new HTTP request for a given method.
-func (adm AdminClient) newRequest(method string, reqData requestData) (req *http.Request, err error) {
+func (adm AdminClient) newRequest(ctx context.Context, method string, reqData requestData) (req *http.Request, err error) {
 	// If no method is supplied default to 'POST'.
 	if method == "" {
 		method = "POST"
@@ -383,10 +459,21 @@ func (adm AdminClient) newRequest(method string, reqData requestData) (req *http
 	}
 
 	// Initialize a new HTTP request for the method.
-	req, err = http.NewRequest(method, targetURL.String(), nil)
+	req, err = http.NewRequestWithContext(ctx, method, targetURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
+
+	value, err := adm.credsProvider.Get()
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		accessKeyID     = value.AccessKeyID
+		secretAccessKey = value.SecretAccessKey
+		sessionToken    = value.SessionToken
+	)
 
 	adm.setUserAgent(req)
 	for k, v := range reqData.customHeaders {
@@ -395,10 +482,11 @@ func (adm AdminClient) newRequest(method string, reqData requestData) (req *http
 	if length := len(reqData.content); length > 0 {
 		req.ContentLength = int64(length)
 	}
-	req.Header.Set("X-Amz-Content-Sha256", hex.EncodeToString(sum256(reqData.content)))
+	sum := sha256.Sum256(reqData.content)
+	req.Header.Set("X-Amz-Content-Sha256", hex.EncodeToString(sum[:]))
 	req.Body = ioutil.NopCloser(bytes.NewReader(reqData.content))
 
-	req = s3signer.SignV4(*req, adm.accessKeyID, adm.secretAccessKey, "", location)
+	req = signer.SignV4(*req, accessKeyID, secretAccessKey, sessionToken, location)
 	return req, nil
 }
 

@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2019 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package sql
 
@@ -135,10 +136,6 @@ func dateAdd(timePart string, qty float64, t time.Time) (*Value, error) {
 	return FromTimestamp(t.Add(duration)), nil
 }
 
-const (
-	dayInNanoseconds = time.Hour * 24
-)
-
 // dateDiff computes the difference between two times in terms of the
 // `timePart` which can be years, months, days, hours, minutes or
 // seconds. For difference in years, months or days, the time part,
@@ -146,42 +143,30 @@ const (
 func dateDiff(timePart string, ts1, ts2 time.Time) (*Value, error) {
 	if ts2.Before(ts1) {
 		v, err := dateDiff(timePart, ts2, ts1)
-		v.negate()
+		if err == nil {
+			v.negate()
+		}
 		return v, err
 	}
 
 	duration := ts2.Sub(ts1)
 	y1, m1, d1 := ts1.Date()
 	y2, m2, d2 := ts2.Date()
-	dy, dm := int64(y2-y1), int64(m2-m1)
 
 	switch timePart {
 	case timePartYear:
+		dy := int64(y2 - y1)
 		if m2 > m1 || (m2 == m1 && d2 >= d1) {
 			return FromInt(dy), nil
 		}
 		return FromInt(dy - 1), nil
 	case timePartMonth:
-		months := 12 * dy
-		if m2 >= m1 {
-			months += dm
-		} else {
-			months += 12 + dm
-		}
-		if d2 < d1 {
-			months--
-		}
-		return FromInt(months), nil
+		m1 += time.Month(12 * y1)
+		m2 += time.Month(12 * y2)
+
+		return FromInt(int64(m2 - m1)), nil
 	case timePartDay:
-		// To compute the number of days between two times
-		// using the time package, zero out the time portions
-		// of the timestamps, compute the difference duration
-		// and then divide by the length of a day.
-		d1 := time.Date(y1, m1, d1, 0, 0, 0, 0, time.UTC)
-		d2 := time.Date(y2, m2, d2, 0, 0, 0, 0, time.UTC)
-		diff := d2.Sub(d1)
-		days := diff / dayInNanoseconds
-		return FromInt(int64(days)), nil
+		return FromInt(int64(duration / (24 * time.Hour))), nil
 	case timePartHour:
 		hours := duration / time.Hour
 		return FromInt(int64(hours)), nil

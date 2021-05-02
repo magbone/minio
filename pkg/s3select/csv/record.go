@@ -1,31 +1,34 @@
-/*
- * Minio Cloud Storage, (C) 2019 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package csv
 
 import (
-	"bytes"
-	"encoding/csv"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 
+	"github.com/bcicen/jstream"
+	csv "github.com/minio/csvparser"
 	"github.com/minio/minio/pkg/s3select/sql"
-	"github.com/tidwall/sjson"
 )
 
-// Record - is CSV record.
+// Record - is a CSV record.
 type Record struct {
 	columnNames  []string
 	csvRecord    []string
@@ -53,45 +56,77 @@ func (r *Record) Get(name string) (*sql.Value, error) {
 }
 
 // Set - sets the value for a column name.
-func (r *Record) Set(name string, value *sql.Value) error {
+func (r *Record) Set(name string, value *sql.Value) (sql.Record, error) {
 	r.columnNames = append(r.columnNames, name)
 	r.csvRecord = append(r.csvRecord, value.CSVString())
-	return nil
+	return r, nil
 }
 
-// MarshalCSV - encodes to CSV data.
-func (r *Record) MarshalCSV(fieldDelimiter rune) ([]byte, error) {
-	buf := new(bytes.Buffer)
-	w := csv.NewWriter(buf)
-	w.Comma = fieldDelimiter
+// Reset data in record.
+func (r *Record) Reset() {
+	if len(r.columnNames) > 0 {
+		r.columnNames = r.columnNames[:0]
+	}
+	if len(r.csvRecord) > 0 {
+		r.csvRecord = r.csvRecord[:0]
+	}
+	for k := range r.nameIndexMap {
+		delete(r.nameIndexMap, k)
+	}
+}
+
+// Clone the record.
+func (r *Record) Clone(dst sql.Record) sql.Record {
+	other, ok := dst.(*Record)
+	if !ok {
+		other = &Record{}
+	}
+	if len(other.columnNames) > 0 {
+		other.columnNames = other.columnNames[:0]
+	}
+	if len(other.csvRecord) > 0 {
+		other.csvRecord = other.csvRecord[:0]
+	}
+	other.columnNames = append(other.columnNames, r.columnNames...)
+	other.csvRecord = append(other.csvRecord, r.csvRecord...)
+	return other
+}
+
+// WriteCSV - encodes to CSV data.
+func (r *Record) WriteCSV(writer io.Writer, opts sql.WriteCSVOpts) error {
+	w := csv.NewWriter(writer)
+	w.Comma = opts.FieldDelimiter
+	w.AlwaysQuote = opts.AlwaysQuote
+	w.Quote = opts.Quote
+	w.QuoteEscape = opts.QuoteEscape
 	if err := w.Write(r.csvRecord); err != nil {
-		return nil, err
+		return err
 	}
 	w.Flush()
 	if err := w.Error(); err != nil {
-		return nil, err
+		return err
 	}
 
-	data := buf.Bytes()
-	return data[:len(data)-1], nil
+	return nil
 }
 
-// MarshalJSON - encodes to JSON data.
-func (r *Record) MarshalJSON() ([]byte, error) {
-	data := "{}"
-
-	var err error
-	for i := len(r.columnNames) - 1; i >= 0; i-- {
-		if i >= len(r.csvRecord) {
-			continue
-		}
-
-		if data, err = sjson.Set(data, r.columnNames[i], r.csvRecord[i]); err != nil {
-			return nil, err
-		}
+// WriteJSON - encodes to JSON data.
+func (r *Record) WriteJSON(writer io.Writer) error {
+	var kvs jstream.KVS = make([]jstream.KV, len(r.columnNames))
+	for i := 0; i < len(r.columnNames); i++ {
+		kvs[i] = jstream.KV{Key: r.columnNames[i], Value: r.csvRecord[i]}
 	}
+	return json.NewEncoder(writer).Encode(kvs)
+}
 
-	return []byte(data), nil
+// Raw - returns the underlying data with format info.
+func (r *Record) Raw() (sql.SelectObjectFormat, interface{}) {
+	return sql.SelectFmtCSV, r
+}
+
+// Replace - is not supported for CSV
+func (r *Record) Replace(_ interface{}) error {
+	return errors.New("Replace is not supported for CSV")
 }
 
 // NewRecord - creates new CSV record.

@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@
  */
 
 import * as actionsObjects from "./actions"
+import { SORT_ORDER_ASC } from "../constants"
 
 const removeObject = (list, objectToRemove, lookup) => {
   const idx = list.findIndex(object => lookup(object) === objectToRemove)
@@ -27,11 +28,11 @@ const removeObject = (list, objectToRemove, lookup) => {
 export default (
   state = {
     list: [],
+    filter: "",
+    listLoading: false,
     sortBy: "",
-    sortOrder: false,
+    sortOrder: SORT_ORDER_ASC,
     currentPrefix: "",
-    marker: "",
-    isTruncated: false,
     prefixWritable: false,
     shareObject: {
       show: false,
@@ -46,23 +47,22 @@ export default (
     case actionsObjects.SET_LIST:
       return {
         ...state,
-        list: action.objects,
-        marker: action.marker,
-        isTruncated: action.isTruncated
+        list: action.objects
       }
     case actionsObjects.RESET_LIST:
       return {
         ...state,
-        list: [],
-        marker: "",
-        isTruncated: false
+        list: []
       }
-    case actionsObjects.APPEND_LIST:
+    case actionsObjects.SET_FILTER:
       return {
         ...state,
-        list: [...state.list, ...action.objects],
-        marker: action.marker,
-        isTruncated: action.isTruncated
+        filter: action.filter
+      }
+    case actionsObjects.SET_LIST_LOADING:
+      return {
+        ...state,
+        listLoading: action.listLoading
       }
     case actionsObjects.REMOVE:
       return {
@@ -82,9 +82,7 @@ export default (
     case actionsObjects.SET_CURRENT_PREFIX:
       return {
         ...state,
-        currentPrefix: action.prefix,
-        marker: "",
-        isTruncated: false
+        currentPrefix: action.prefix
       }
     case actionsObjects.SET_PREFIX_WRITABLE:
       return {
@@ -97,7 +95,8 @@ export default (
         shareObject: {
           show: action.show,
           object: action.object,
-          url: action.url
+          url: action.url,
+          showExpiryDate: action.showExpiryDate
         }
       }
     case actionsObjects.CHECKED_LIST_ADD:

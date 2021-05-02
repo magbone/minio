@@ -1,22 +1,24 @@
-/*
- * Minio Cloud Storage, (C) 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -34,6 +36,36 @@ func TestRegisterGatewayCommand(t *testing.T) {
 	}
 }
 
+// Test running a registered gateway command with a flag
+func TestRunRegisteredGatewayCommand(t *testing.T) {
+	var err error
+
+	flagName := "test-flag"
+	flagValue := "foo"
+
+	cmd := cli.Command{
+		Name: "test-run-with-flag",
+		Flags: []cli.Flag{
+			cli.StringFlag{Name: flagName},
+		},
+		Action: func(ctx *cli.Context) {
+			if actual := ctx.String(flagName); actual != flagValue {
+				t.Errorf("value of %s expects %s, but got %s", flagName, flagValue, actual)
+			}
+		},
+	}
+
+	err = RegisterGatewayCommand(cmd)
+	if err != nil {
+		t.Errorf("RegisterGatewayCommand got unexpected error: %s", err)
+	}
+
+	if err = newApp("minio").Run(
+		[]string{"minio", "gateway", cmd.Name, fmt.Sprintf("--%s", flagName), flagValue}); err != nil {
+		t.Errorf("running registered gateway command got unexpected error: %s", err)
+	}
+}
+
 // Test parseGatewayEndpoint
 func TestParseGatewayEndpoint(t *testing.T) {
 	testCases := []struct {
@@ -44,11 +76,11 @@ func TestParseGatewayEndpoint(t *testing.T) {
 	}{
 		{"http://127.0.0.1:9000", "127.0.0.1:9000", false, false},
 		{"https://127.0.0.1:9000", "127.0.0.1:9000", true, false},
-		{"http://play.minio.io:9000", "play.minio.io:9000", false, false},
-		{"https://play.minio.io:9000", "play.minio.io:9000", true, false},
+		{"http://play.min.io:9000", "play.min.io:9000", false, false},
+		{"https://play.min.io:9000", "play.min.io:9000", true, false},
 		{"ftp://127.0.0.1:9000", "", false, true},
-		{"ftp://play.minio.io:9000", "", false, true},
-		{"play.minio.io:9000", "play.minio.io:9000", true, false},
+		{"ftp://play.min.io:9000", "", false, true},
+		{"play.min.io:9000", "play.min.io:9000", true, false},
 	}
 
 	for i, test := range testCases {

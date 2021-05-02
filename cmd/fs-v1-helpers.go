@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2016, 2017, 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -22,6 +23,7 @@ import (
 	"os"
 	pathutil "path"
 	"runtime"
+	"strings"
 
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/lock"
@@ -41,9 +43,8 @@ func fsRemoveFile(ctx context.Context, filePath string) (err error) {
 		return err
 	}
 
-	if err = os.Remove((filePath)); err != nil {
-		err = osErrToFSFileErr(err)
-		if err != errFileNotFound {
+	if err = os.Remove(filePath); err != nil {
+		if err = osErrToFileErr(err); err != errFileNotFound {
 			logger.LogIf(ctx, err)
 		}
 	}
@@ -65,7 +66,7 @@ func fsRemoveAll(ctx context.Context, dirPath string) (err error) {
 	}
 
 	if err = removeAll(dirPath); err != nil {
-		if os.IsPermission(err) {
+		if osIsPermission(err) {
 			logger.LogIf(ctx, errVolumeAccessDenied)
 			return errVolumeAccessDenied
 		} else if isSysErrNotEmpty(err) {
@@ -93,7 +94,7 @@ func fsRemoveDir(ctx context.Context, dirPath string) (err error) {
 	}
 
 	if err = os.Remove((dirPath)); err != nil {
-		if os.IsNotExist(err) {
+		if osIsNotExist(err) {
 			return errVolumeNotFound
 		} else if isSysErrNotEmpty(err) {
 			return errVolumeNotEmpty
@@ -122,9 +123,9 @@ func fsMkdir(ctx context.Context, dirPath string) (err error) {
 
 	if err = os.Mkdir((dirPath), 0777); err != nil {
 		switch {
-		case os.IsExist(err):
+		case osIsExist(err):
 			return errVolumeExists
-		case os.IsPermission(err):
+		case osIsPermission(err):
 			logger.LogIf(ctx, errDiskAccessDenied)
 			return errDiskAccessDenied
 		case isSysErrNotDir(err):
@@ -171,9 +172,9 @@ func fsStat(ctx context.Context, statLoc string) (os.FileInfo, error) {
 func fsStatVolume(ctx context.Context, volume string) (os.FileInfo, error) {
 	fi, err := fsStat(ctx, volume)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if osIsNotExist(err) {
 			return nil, errVolumeNotFound
-		} else if os.IsPermission(err) {
+		} else if osIsPermission(err) {
 			return nil, errVolumeAccessDenied
 		}
 		return nil, err
@@ -186,34 +187,11 @@ func fsStatVolume(ctx context.Context, volume string) (os.FileInfo, error) {
 	return fi, nil
 }
 
-// Is a one place function which converts all os.PathError
-// into a more FS object layer friendly form, converts
-// known errors into their typed form for top level
-// interpretation.
-func osErrToFSFileErr(err error) error {
-	if err == nil {
-		return nil
-	}
-	if os.IsNotExist(err) {
-		return errFileNotFound
-	}
-	if os.IsPermission(err) {
-		return errFileAccessDenied
-	}
-	if isSysErrNotDir(err) {
-		return errFileNotFound
-	}
-	if isSysErrPathNotFound(err) {
-		return errFileNotFound
-	}
-	return err
-}
-
 // Lookup if directory exists, returns directory attributes upon success.
 func fsStatDir(ctx context.Context, statDir string) (os.FileInfo, error) {
 	fi, err := fsStat(ctx, statDir)
 	if err != nil {
-		err = osErrToFSFileErr(err)
+		err = osErrToFileErr(err)
 		if err != errFileNotFound {
 			logger.LogIf(ctx, err)
 		}
@@ -225,20 +203,11 @@ func fsStatDir(ctx context.Context, statDir string) (os.FileInfo, error) {
 	return fi, nil
 }
 
-// Returns if the dirPath is a directory.
-func fsIsDir(ctx context.Context, dirPath string) bool {
-	fi, err := fsStat(ctx, dirPath)
-	if err != nil {
-		return false
-	}
-	return fi.IsDir()
-}
-
 // Lookup if file exists, returns file attributes upon success.
 func fsStatFile(ctx context.Context, statFile string) (os.FileInfo, error) {
 	fi, err := fsStat(ctx, statFile)
 	if err != nil {
-		err = osErrToFSFileErr(err)
+		err = osErrToFileErr(err)
 		if err != errFileNotFound {
 			logger.LogIf(ctx, err)
 		}
@@ -273,13 +242,13 @@ func fsOpenFile(ctx context.Context, readPath string, offset int64) (io.ReadClos
 
 	fr, err := os.Open(readPath)
 	if err != nil {
-		return nil, 0, osErrToFSFileErr(err)
+		return nil, 0, osErrToFileErr(err)
 	}
 
 	// Stat to get the size of the file at path.
-	st, err := os.Stat(readPath)
+	st, err := fr.Stat()
 	if err != nil {
-		err = osErrToFSFileErr(err)
+		err = osErrToFileErr(err)
 		if err != errFileNotFound {
 			logger.LogIf(ctx, err)
 		}
@@ -288,7 +257,6 @@ func fsOpenFile(ctx context.Context, readPath string, offset int64) (io.ReadClos
 
 	// Verify if its not a regular file, since subsequent Seek is undefined.
 	if !st.Mode().IsRegular() {
-		logger.LogIf(ctx, errIsNotRegular)
 		return nil, 0, errIsNotRegular
 	}
 
@@ -305,8 +273,8 @@ func fsOpenFile(ctx context.Context, readPath string, offset int64) (io.ReadClos
 	return fr, st.Size(), nil
 }
 
-// Creates a file and copies data from incoming reader. Staging buffer is used by io.CopyBuffer.
-func fsCreateFile(ctx context.Context, filePath string, reader io.Reader, buf []byte, fallocSize int64) (int64, error) {
+// Creates a file and copies data from incoming reader.
+func fsCreateFile(ctx context.Context, filePath string, reader io.Reader, fallocSize int64) (int64, error) {
 	if filePath == "" || reader == nil {
 		logger.LogIf(ctx, errInvalidArgument)
 		return 0, errInvalidArgument
@@ -318,74 +286,43 @@ func fsCreateFile(ctx context.Context, filePath string, reader io.Reader, buf []
 	}
 
 	if err := mkdirAll(pathutil.Dir(filePath), 0777); err != nil {
-		logger.LogIf(ctx, err)
+		switch {
+		case osIsPermission(err):
+			return 0, errFileAccessDenied
+		case osIsExist(err):
+			return 0, errFileAccessDenied
+		case isSysErrIO(err):
+			return 0, errFaultyDisk
+		case isSysErrInvalidArg(err):
+			return 0, errUnsupportedDisk
+		case isSysErrNoSpace(err):
+			return 0, errDiskFull
+		}
 		return 0, err
 	}
 
-	if err := checkDiskFree(pathutil.Dir(filePath), fallocSize); err != nil {
-		logger.LogIf(ctx, err)
-		return 0, err
+	flags := os.O_CREATE | os.O_WRONLY
+	if globalFSOSync {
+		flags = flags | os.O_SYNC
 	}
-
-	writer, err := lock.Open(filePath, os.O_CREATE|os.O_WRONLY, 0666)
+	writer, err := lock.Open(filePath, flags, 0666)
 	if err != nil {
-		return 0, osErrToFSFileErr(err)
+		return 0, osErrToFileErr(err)
 	}
 	defer writer.Close()
 
-	// Fallocate only if the size is final object is known.
-	if fallocSize > 0 {
-		if err = fsFAllocate(int(writer.Fd()), 0, fallocSize); err != nil {
-			logger.LogIf(ctx, err)
-			return 0, err
-		}
-	}
-
-	var bytesWritten int64
-	if buf != nil {
-		bytesWritten, err = io.CopyBuffer(writer, reader, buf)
-		if err != nil {
-			if err != io.ErrUnexpectedEOF {
-				logger.LogIf(ctx, err)
-			}
-			return 0, err
-		}
-	} else {
-		bytesWritten, err = io.Copy(writer, reader)
-		if err != nil {
-			logger.LogIf(ctx, err)
-			return 0, err
-		}
+	bytesWritten, err := io.Copy(writer, reader)
+	if err != nil {
+		logger.LogIf(ctx, err)
+		return 0, err
 	}
 
 	return bytesWritten, nil
 }
 
-// fsFAllocate is similar to Fallocate but provides a convenient
-// wrapper to handle various operating system specific errors.
-func fsFAllocate(fd int, offset int64, len int64) (err error) {
-	e := Fallocate(fd, offset, len)
-	// Ignore errors when Fallocate is not supported in the current system
-	if e != nil && !isSysErrNoSys(e) && !isSysErrOpNotSupported(e) {
-		switch {
-		case isSysErrNoSpace(e):
-			err = errDiskFull
-		case isSysErrIO(e):
-			err = e
-		default:
-			// For errors: EBADF, EINTR, EINVAL, ENODEV, EPERM, ESPIPE  and ETXTBSY
-			// Appending was failed anyway, returns unexpected error
-			err = errUnexpected
-		}
-		return err
-	}
-
-	return nil
-}
-
-// Renames source path to destination path, creates all the
-// missing parents if they don't exist.
-func fsRenameFile(ctx context.Context, sourcePath, destPath string) error {
+// Renames source path to destination path, fails if the destination path
+// parents are not already created.
+func fsSimpleRenameFile(ctx context.Context, sourcePath, destPath string) error {
 	if err := checkPathLength(sourcePath); err != nil {
 		logger.LogIf(ctx, err)
 		return err
@@ -395,15 +332,59 @@ func fsRenameFile(ctx context.Context, sourcePath, destPath string) error {
 		return err
 	}
 
-	// Verify if source path exists.
-	if _, err := os.Stat(sourcePath); err != nil {
-		return osErrToFSFileErr(err)
+	if err := os.Rename(sourcePath, destPath); err != nil {
+		logger.LogIf(ctx, err)
+		return osErrToFileErr(err)
 	}
 
-	if err := renameAll(sourcePath, destPath); err != nil {
-		logger.LogIf(ctx, err)
-		return err
+	return nil
+}
+
+func deleteFile(basePath, deletePath string, recursive bool) error {
+	if basePath == "" || deletePath == "" {
+		return nil
 	}
+	isObjectDir := HasSuffix(deletePath, SlashSeparator)
+	basePath = pathutil.Clean(basePath)
+	deletePath = pathutil.Clean(deletePath)
+	if !strings.HasPrefix(deletePath, basePath) || deletePath == basePath {
+		return nil
+	}
+
+	var err error
+	if recursive {
+		os.RemoveAll(deletePath)
+	} else {
+		err = os.Remove(deletePath)
+	}
+	if err != nil {
+		switch {
+		case isSysErrNotEmpty(err):
+			// if object is a directory, but if its not empty
+			// return FileNotFound to indicate its an empty prefix.
+			if isObjectDir {
+				return errFileNotFound
+			}
+			// Ignore errors if the directory is not empty. The server relies on
+			// this functionality, and sometimes uses recursion that should not
+			// error on parent directories.
+			return nil
+		case osIsNotExist(err):
+			return errFileNotFound
+		case osIsPermission(err):
+			return errFileAccessDenied
+		case isSysErrIO(err):
+			return errFaultyDisk
+		default:
+			return err
+		}
+	}
+
+	deletePath = pathutil.Dir(deletePath)
+
+	// Delete parent directory obviously not recursively. Errors for
+	// parent directories shouldn't trickle down.
+	deleteFile(basePath, deletePath, false)
 
 	return nil
 }
@@ -420,7 +401,7 @@ func fsDeleteFile(ctx context.Context, basePath, deletePath string) error {
 		return err
 	}
 
-	if err := deleteFile(basePath, deletePath); err != nil {
+	if err := deleteFile(basePath, deletePath, false); err != nil {
 		if err != errFileNotFound {
 			logger.LogIf(ctx, err)
 		}

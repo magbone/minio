@@ -1,71 +1,31 @@
-/*
- * Minio Cloud Storage, (C) 2016, 2017, 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
-/*
- * Below main package has canonical imports for 'go get' and 'go build'
- * to work with all other clones of github.com/minio/minio repository. For
- * more information refer https://golang.org/doc/go1.4#canonicalimports
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package main // import "github.com/minio/minio"
 
 import (
-	"fmt"
 	"os"
-	"runtime"
 
-	version "github.com/hashicorp/go-version"
-	"github.com/minio/mc/pkg/console"
 	minio "github.com/minio/minio/cmd"
 
 	// Import gateway
 	_ "github.com/minio/minio/cmd/gateway"
 )
 
-const (
-	// Minio requires at least Go v1.9.4
-	minGoVersion        = "1.9.4"
-	goVersionConstraint = ">= " + minGoVersion
-)
-
-// Check if this binary is compiled with at least minimum Go version.
-func checkGoVersion(goVersionStr string) error {
-	constraint, err := version.NewConstraint(goVersionConstraint)
-	if err != nil {
-		return fmt.Errorf("'%s': %s", goVersionConstraint, err)
-	}
-
-	goVersion, err := version.NewVersion(goVersionStr)
-	if err != nil {
-		return err
-	}
-
-	if !constraint.Check(goVersion) {
-		return fmt.Errorf("Minio is not compiled by go %s. Minimum required version is %s, go %s release is known to have security issues. Please recompile accordingly", goVersionConstraint, minGoVersion, runtime.Version()[2:])
-	}
-
-	return nil
-}
-
 func main() {
-	// When `go get` is used minimum Go version check is not triggered but it would have compiled it successfully.
-	// However such binary will fail at runtime, hence we also check Go version at runtime.
-	if err := checkGoVersion(runtime.Version()[2:]); err != nil {
-		console.Errorln(err)
-	}
-
 	minio.Main(os.Args)
 }

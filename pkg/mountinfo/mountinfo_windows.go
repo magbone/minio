@@ -1,25 +1,29 @@
 // +build windows
 
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package mountinfo
 
 import (
-	"os"
+	"path/filepath"
+	"sync"
+
+	"golang.org/x/sys/windows"
 )
 
 // CheckCrossDevice - check if any input path has multiple sub-mounts.
@@ -28,32 +32,31 @@ func CheckCrossDevice(paths []string) error {
 	return nil
 }
 
-// fileExists checks if specified file exists.
-func fileExists(filename string) (bool, error) {
-	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		return false, nil
-	} else if err != nil {
-		return false, err
-	}
-	return true, nil
-}
+// mountPointCache contains results of IsLikelyMountPoint
+var mountPointCache sync.Map
 
 // IsLikelyMountPoint determines if a directory is a mountpoint.
-func IsLikelyMountPoint(file string) bool {
-	stat, err := os.Lstat(file)
-	if err != nil {
+func IsLikelyMountPoint(path string) bool {
+	path = filepath.Dir(path)
+	if v, ok := mountPointCache.Load(path); ok {
+		return v.(bool)
+	}
+	wpath, _ := windows.UTF16PtrFromString(path)
+	wvolume := make([]uint16, len(path)+1)
+
+	if err := windows.GetVolumePathName(wpath, &wvolume[0], uint32(len(wvolume))); err != nil {
+		mountPointCache.Store(path, false)
 		return false
 	}
 
-	// If current file is a symlink, then it is a mountpoint.
-	if stat.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(file)
-		if err != nil {
-			return false
-		}
-		exists, _ := fileExists(target)
-		return exists
+	switch windows.GetDriveType(&wvolume[0]) {
+	case windows.DRIVE_FIXED, windows.DRIVE_REMOVABLE, windows.DRIVE_REMOTE, windows.DRIVE_RAMDISK:
+		// Recognize "fixed", "removable", "remote" and "ramdisk" drives as proper drives
+		// which can be treated as an actual mount-point, rest can be ignored.
+		// https://docs.microsoft.com/en-us/windows/desktop/api/fileapi/nf-fileapi-getdrivetypew
+		mountPointCache.Store(path, true)
+		return true
 	}
-
+	mountPointCache.Store(path, false)
 	return false
 }

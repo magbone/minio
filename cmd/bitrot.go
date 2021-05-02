@@ -1,54 +1,38 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
-	"context"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"hash"
 	"io"
 
 	"github.com/minio/highwayhash"
 	"github.com/minio/minio/cmd/logger"
-	sha256 "github.com/minio/sha256-simd"
 	"golang.org/x/crypto/blake2b"
 )
 
 // magic HH-256 key as HH-256 hash of the first 100 decimals of π as utf-8 string with a zero key.
 var magicHighwayHash256Key = []byte("\x4b\xe7\x34\xfa\x8e\x23\x8a\xcd\x26\x3e\x83\xe6\xbb\x96\x85\x52\x04\x0f\x93\x5d\xa3\x9f\x44\x14\x97\xe0\x9d\x13\x22\xde\x36\xa0")
-
-// BitrotAlgorithm specifies a algorithm used for bitrot protection.
-type BitrotAlgorithm uint
-
-const (
-	// SHA256 represents the SHA-256 hash function
-	SHA256 BitrotAlgorithm = 1 + iota
-	// HighwayHash256 represents the HighwayHash-256 hash function
-	HighwayHash256
-	// HighwayHash256S represents the Streaming HighwayHash-256 hash function
-	HighwayHash256S
-	// BLAKE2b512 represents the BLAKE2b-512 hash function
-	BLAKE2b512
-)
-
-// DefaultBitrotAlgorithm is the default algorithm used for bitrot protection.
-const (
-	DefaultBitrotAlgorithm = HighwayHash256S
-)
 
 var bitrotAlgorithms = map[BitrotAlgorithm]string{
 	SHA256:          "sha256",
@@ -72,7 +56,7 @@ func (a BitrotAlgorithm) New() hash.Hash {
 		hh, _ := highwayhash.New(magicHighwayHash256Key) // New will never return error since key is 256 bit
 		return hh
 	default:
-		logger.CriticalIf(context.Background(), errors.New("Unsupported bitrot algorithm"))
+		logger.CriticalIf(GlobalContext, errors.New("Unsupported bitrot algorithm"))
 		return nil
 	}
 }
@@ -88,7 +72,7 @@ func (a BitrotAlgorithm) Available() bool {
 func (a BitrotAlgorithm) String() string {
 	name, ok := bitrotAlgorithms[a]
 	if !ok {
-		logger.CriticalIf(context.Background(), errors.New("Unsupported bitrot algorithm"))
+		logger.CriticalIf(GlobalContext, errors.New("Unsupported bitrot algorithm"))
 	}
 	return name
 }
@@ -116,16 +100,16 @@ func BitrotAlgorithmFromString(s string) (a BitrotAlgorithm) {
 	return
 }
 
-func newBitrotWriter(disk StorageAPI, volume, filePath string, length int64, algo BitrotAlgorithm, shardSize int64) io.Writer {
+func newBitrotWriter(disk StorageAPI, volume, filePath string, length int64, algo BitrotAlgorithm, shardSize int64, heal bool) io.Writer {
 	if algo == HighwayHash256S {
-		return newStreamingBitrotWriter(disk, volume, filePath, length, algo, shardSize)
+		return newStreamingBitrotWriter(disk, volume, filePath, length, algo, shardSize, heal)
 	}
-	return newWholeBitrotWriter(disk, volume, filePath, length, algo, shardSize)
+	return newWholeBitrotWriter(disk, volume, filePath, algo, shardSize)
 }
 
-func newBitrotReader(disk StorageAPI, bucket string, filePath string, tillOffset int64, algo BitrotAlgorithm, sum []byte, shardSize int64) io.ReaderAt {
+func newBitrotReader(disk StorageAPI, data []byte, bucket string, filePath string, tillOffset int64, algo BitrotAlgorithm, sum []byte, shardSize int64) io.ReaderAt {
 	if algo == HighwayHash256S {
-		return newStreamingBitrotReader(disk, bucket, filePath, tillOffset, algo, shardSize)
+		return newStreamingBitrotReader(disk, data, bucket, filePath, tillOffset, algo, shardSize)
 	}
 	return newWholeBitrotReader(disk, bucket, filePath, algo, tillOffset, sum)
 }
@@ -133,7 +117,7 @@ func newBitrotReader(disk StorageAPI, bucket string, filePath string, tillOffset
 // Close all the readers.
 func closeBitrotReaders(rs []io.ReaderAt) {
 	for _, r := range rs {
-		if br, ok := r.(*streamingBitrotReader); ok {
+		if br, ok := r.(io.Closer); ok {
 			br.Close()
 		}
 	}
@@ -142,7 +126,7 @@ func closeBitrotReaders(rs []io.ReaderAt) {
 // Close all the writers.
 func closeBitrotWriters(ws []io.Writer) {
 	for _, w := range ws {
-		if bw, ok := w.(*streamingBitrotWriter); ok {
+		if bw, ok := w.(io.Closer); ok {
 			bw.Close()
 		}
 	}
@@ -156,32 +140,100 @@ func bitrotWriterSum(w io.Writer) []byte {
 	return nil
 }
 
-// Verify if a file has bitrot error.
-func bitrotCheckFile(disk StorageAPI, volume string, filePath string, tillOffset int64, algo BitrotAlgorithm, sum []byte, shardSize int64) (err error) {
+// Returns the size of the file with bitrot protection
+func bitrotShardFileSize(size int64, shardSize int64, algo BitrotAlgorithm) int64 {
 	if algo != HighwayHash256S {
-		buf := []byte{}
-		// For whole-file bitrot we don't need to read the entire file as the bitrot verify happens on the server side even if we read 0-bytes.
-		_, err = disk.ReadFile(volume, filePath, 0, buf, NewBitrotVerifier(algo, sum))
-		return err
+		return size
 	}
+	return ceilFrac(size, shardSize)*int64(algo.New().Size()) + size
+}
+
+// bitrotVerify a single stream of data.
+func bitrotVerify(r io.Reader, wantSize, partSize int64, algo BitrotAlgorithm, want []byte, shardSize int64) error {
+	if algo != HighwayHash256S {
+		h := algo.New()
+		if n, err := io.Copy(h, r); err != nil || n != wantSize {
+			// Premature failure in reading the object, file is corrupt.
+			return errFileCorrupt
+		}
+		if !bytes.Equal(h.Sum(nil), want) {
+			return errFileCorrupt
+		}
+		return nil
+	}
+
+	h := algo.New()
+	hashBuf := make([]byte, h.Size())
 	buf := make([]byte, shardSize)
-	r := newStreamingBitrotReader(disk, volume, filePath, tillOffset, algo, shardSize)
-	defer closeBitrotReaders([]io.ReaderAt{r})
-	var offset int64
-	for {
-		if offset == tillOffset {
-			break
-		}
-		var n int
-		tmpBuf := buf
-		if int64(len(tmpBuf)) > (tillOffset - offset) {
-			tmpBuf = tmpBuf[:(tillOffset - offset)]
-		}
-		n, err = r.ReadAt(tmpBuf, offset)
+	left := wantSize
+
+	// Calculate the size of the bitrot file and compare
+	// it with the actual file size.
+	if left != bitrotShardFileSize(partSize, shardSize, algo) {
+		return errFileCorrupt
+	}
+
+	for left > 0 {
+		// Read expected hash...
+		h.Reset()
+		n, err := io.ReadFull(r, hashBuf)
 		if err != nil {
+			// Read's failed for object with right size, file is corrupt.
 			return err
 		}
-		offset += int64(n)
+		// Subtract hash length..
+		left -= int64(n)
+		if left < shardSize {
+			shardSize = left
+		}
+		read, err := io.CopyBuffer(h, io.LimitReader(r, shardSize), buf)
+		if err != nil {
+			// Read's failed for object with right size, at different offsets.
+			return err
+		}
+		left -= read
+		if !bytes.Equal(h.Sum(nil), hashBuf) {
+			return errFileCorrupt
+		}
 	}
 	return nil
+}
+
+// bitrotSelfTest performs a self-test to ensure that bitrot
+// algorithms compute correct checksums. If any algorithm
+// produces an incorrect checksum it fails with a hard error.
+//
+// bitrotSelfTest tries to catch any issue in the bitrot implementation
+// early instead of silently corrupting data.
+func bitrotSelfTest() {
+	var checksums = map[BitrotAlgorithm]string{
+		SHA256:          "a7677ff19e0182e4d52e3a3db727804abc82a5818749336369552e54b838b004",
+		BLAKE2b512:      "e519b7d84b1c3c917985f544773a35cf265dcab10948be3550320d156bab612124a5ae2ae5a8c73c0eea360f68b0e28136f26e858756dbfe7375a7389f26c669",
+		HighwayHash256:  "39c0407ed3f01b18d22c85db4aeff11e060ca5f43131b0126731ca197cd42313",
+		HighwayHash256S: "39c0407ed3f01b18d22c85db4aeff11e060ca5f43131b0126731ca197cd42313",
+	}
+	for algorithm := range bitrotAlgorithms {
+		if !algorithm.Available() {
+			continue
+		}
+
+		checksum, err := hex.DecodeString(checksums[algorithm])
+		if err != nil {
+			logger.Fatal(errSelfTestFailure, fmt.Sprintf("bitrot: failed to decode %v checksum %s for selftest: %v", algorithm, checksums[algorithm], err))
+		}
+		var (
+			hash = algorithm.New()
+			msg  = make([]byte, 0, hash.Size()*hash.BlockSize())
+			sum  = make([]byte, 0, hash.Size())
+		)
+		for i := 0; i < hash.Size()*hash.BlockSize(); i += hash.Size() {
+			hash.Write(msg)
+			sum = hash.Sum(sum[:0])
+			msg = append(msg, sum...)
+			hash.Reset()
+		}
+		if !bytes.Equal(sum, checksum) {
+			logger.Fatal(errSelfTestFailure, fmt.Sprintf("bitrot: %v selftest checksum mismatch: got %x - want %x", algorithm, sum, checksum))
+		}
+	}
 }

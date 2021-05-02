@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2019 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package s3select
 
@@ -61,6 +62,19 @@ var recordsHeader = []byte{
 	11, ':', 'e', 'v', 'e', 'n', 't', '-', 't', 'y', 'p', 'e', 7, 0, 7, 'R', 'e', 'c', 'o', 'r', 'd', 's',
 }
 
+const (
+	// Chosen for compatibility with AWS JAVA SDK
+	// It has a a buffer size of 128K:
+	// https://github.com/aws/aws-sdk-java/blob/master/aws-java-sdk-s3/src/main/java/com/amazonaws/services/s3/internal/eventstreaming/MessageDecoder.java#L26
+	// but we must make sure there is always space to add 256 bytes:
+	// https://github.com/aws/aws-sdk-java/blob/master/aws-java-sdk-s3/src/main/java/com/amazonaws/services/s3/model/SelectObjectContentEventStream.java#L197
+	maxRecordMessageLength = (128 << 10) - 256
+)
+
+var (
+	bufLength = payloadLenForMsgLen(maxRecordMessageLength)
+)
+
 // newRecordsMessage - creates new Records Message which can contain a single record, partial records,
 // or multiple records. Depending on the size of the result, a response can contain one or more of these messages.
 //
@@ -72,6 +86,14 @@ var recordsHeader = []byte{
 // Records message payloads can contain a single record, partial records, or multiple records.
 func newRecordsMessage(payload []byte) []byte {
 	return genMessage(recordsHeader, payload)
+}
+
+// payloadLenForMsgLen computes the length of the payload in a record
+// message given the total length of the message.
+func payloadLenForMsgLen(messageLength int) int {
+	headerLength := len(recordsHeader)
+	payloadLength := messageLength - 4 - 4 - 4 - headerLength - 4
+	return payloadLength
 }
 
 // continuationMessage - S3 periodically sends this message to keep the TCP connection open.
@@ -226,7 +248,7 @@ type messageWriter struct {
 
 	payloadBuffer      []byte
 	payloadBufferIndex int
-	payloadCh          chan []byte
+	payloadCh          chan *bytes.Buffer
 
 	finBytesScanned, finBytesProcessed int64
 
@@ -292,16 +314,22 @@ func (writer *messageWriter) start() {
 				}
 				writer.write(endMessage)
 			} else {
-				// Write record payload to staging buffer
-				freeSpace := bufLength - writer.payloadBufferIndex
-				if len(payload) > freeSpace {
-					if !writer.flushRecords() {
-						quitFlag = true
-						break
+				for payload.Len() > 0 {
+					copiedLen := copy(writer.payloadBuffer[writer.payloadBufferIndex:], payload.Bytes())
+					writer.payloadBufferIndex += copiedLen
+					payload.Next(copiedLen)
+
+					// If buffer is filled, flush it now!
+					freeSpace := bufLength - writer.payloadBufferIndex
+					if freeSpace == 0 {
+						if !writer.flushRecords() {
+							quitFlag = true
+							break
+						}
 					}
 				}
-				copy(writer.payloadBuffer[writer.payloadBufferIndex:], payload)
-				writer.payloadBufferIndex += len(payload)
+
+				bufPool.Put(payload)
 			}
 
 		case <-recordStagingTicker.C:
@@ -329,14 +357,16 @@ func (writer *messageWriter) start() {
 	if progressTicker != nil {
 		progressTicker.Stop()
 	}
+
+	// Whatever drain the payloadCh to prevent from memory leaking.
+	for len(writer.payloadCh) > 0 {
+		payload := <-writer.payloadCh
+		bufPool.Put(payload)
+	}
 }
 
-const (
-	bufLength = maxRecordSize
-)
-
 // Sends a single whole record.
-func (writer *messageWriter) SendRecord(payload []byte) error {
+func (writer *messageWriter) SendRecord(payload *bytes.Buffer) error {
 	select {
 	case writer.payloadCh <- payload:
 		return nil
@@ -393,7 +423,7 @@ func newMessageWriter(w http.ResponseWriter, getProgressFunc func() (bytesScanne
 		getProgressFunc: getProgressFunc,
 
 		payloadBuffer: make([]byte, bufLength),
-		payloadCh:     make(chan []byte),
+		payloadCh:     make(chan *bytes.Buffer, 1),
 
 		errCh:  make(chan []byte),
 		doneCh: make(chan struct{}),

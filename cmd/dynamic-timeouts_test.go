@@ -1,23 +1,26 @@
-/*
- * Minio Cloud Storage, (C) 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
 	"math/rand"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 )
@@ -98,7 +101,7 @@ func TestDynamicTimeoutDualDecrease(t *testing.T) {
 	adjustedAgain := timeout.Timeout()
 
 	if initial <= adjusted || adjusted <= adjustedAgain {
-		t.Errorf("Failure to decrease timeout multiple times")
+		t.Errorf("Failure to decrease timeout multiple times, initial: %v, adjusted: %v, again: %v", initial, adjusted, adjustedAgain)
 	}
 }
 
@@ -121,6 +124,30 @@ func TestDynamicTimeoutManyDecreases(t *testing.T) {
 	if initial <= adjusted || adjusted <= successTimeout {
 		t.Errorf("Failure to decrease timeout appropriately")
 	}
+}
+
+func TestDynamicTimeoutConcurrent(t *testing.T) {
+	// Race test.
+	timeout := newDynamicTimeout(time.Second, time.Millisecond)
+	var wg sync.WaitGroup
+	for i := 0; i < runtime.GOMAXPROCS(0); i++ {
+		wg.Add(1)
+		rng := rand.New(rand.NewSource(int64(i)))
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 100; i++ {
+				timeout.LogFailure()
+				for j := 0; j < 100; j++ {
+					timeout.LogSuccess(time.Duration(float64(time.Second) * rng.Float64()))
+				}
+				to := timeout.Timeout()
+				if to < time.Millisecond || to > time.Second {
+					panic(to)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestDynamicTimeoutHitMinimum(t *testing.T) {
@@ -168,7 +195,7 @@ func TestDynamicTimeoutAdjustExponential(t *testing.T) {
 
 	timeout := newDynamicTimeout(time.Minute, time.Second)
 
-	rand.Seed(time.Now().UTC().UnixNano())
+	rand.Seed(0)
 
 	initial := timeout.Timeout()
 
@@ -188,7 +215,7 @@ func TestDynamicTimeoutAdjustNormalized(t *testing.T) {
 
 	timeout := newDynamicTimeout(time.Minute, time.Second)
 
-	rand.Seed(time.Now().UTC().UnixNano())
+	rand.Seed(0)
 
 	initial := timeout.Timeout()
 

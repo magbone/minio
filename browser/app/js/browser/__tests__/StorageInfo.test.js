@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,10 +21,7 @@ import { StorageInfo } from "../StorageInfo"
 describe("StorageInfo", () => {
   it("should render without crashing", () => {
     shallow(
-      <StorageInfo
-        storageInfo={{ used: 60 }}
-        fetchStorageInfo={jest.fn()}
-      />
+      <StorageInfo storageInfo={ {used: 60} } fetchStorageInfo={jest.fn()} />
     )
   })
 
@@ -32,10 +29,21 @@ describe("StorageInfo", () => {
     const fetchStorageInfo = jest.fn()
     shallow(
       <StorageInfo
-        storageInfo={{ used: 60 }}
+        storageInfo={ {used: 60} }
         fetchStorageInfo={fetchStorageInfo}
       />
     )
     expect(fetchStorageInfo).toHaveBeenCalled()
+  })
+
+  it("should not render anything if used is null", () => {
+    const fetchStorageInfo = jest.fn()
+    const wrapper = shallow(
+      <StorageInfo
+      storageInfo={ {used: 0} }
+        fetchStorageInfo={fetchStorageInfo}
+      />
+    )
+    expect(wrapper.text()).toBe("")
   })
 })

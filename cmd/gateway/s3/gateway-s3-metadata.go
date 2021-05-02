@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,12 +21,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"time"
 
+	jsoniter "github.com/json-iterator/go"
 	minio "github.com/minio/minio/cmd"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/hash"
-	"github.com/tidwall/gjson"
 )
 
 var (
@@ -83,6 +84,7 @@ func (m gwMetaV1) ToObjectInfo(bucket, object string) minio.ObjectInfo {
 		"Content-Length",
 		"Last-Modified",
 		"Content-Type",
+		"Expires",
 	}, defaultFilterKeys...)
 	objInfo := minio.ObjectInfo{
 		IsDir:           false,
@@ -93,12 +95,21 @@ func (m gwMetaV1) ToObjectInfo(bucket, object string) minio.ObjectInfo {
 		ContentType:     m.Meta["content-type"],
 		ContentEncoding: m.Meta["content-encoding"],
 		ETag:            minio.CanonicalizeETag(m.ETag),
-		UserDefined:     minio.CleanMetadataKeys(m.Meta, filterKeys...),
+		UserDefined:     minio.CleanMinioInternalMetadataKeys(minio.CleanMetadataKeys(m.Meta, filterKeys...)),
 		Parts:           m.Parts,
 	}
 
 	if sc, ok := m.Meta["x-amz-storage-class"]; ok {
 		objInfo.StorageClass = sc
+	}
+	var (
+		t time.Time
+		e error
+	)
+	if exp, ok := m.Meta["expires"]; ok {
+		if t, e = time.Parse(http.TimeFormat, exp); e == nil {
+			objInfo.Expires = t.UTC()
+		}
 	}
 	// Success.
 	return objInfo
@@ -126,84 +137,11 @@ func (m gwMetaV1) ObjectToPartOffset(ctx context.Context, offset int64) (partInd
 	return 0, 0, minio.InvalidRange{}
 }
 
-// parses gateway metadata stat info from metadata json
-func parseGWStat(gwMetaBuf []byte) (si minio.StatInfo, e error) {
-	// obtain stat info.
-	stat := minio.StatInfo{}
-	// fetching modTime.
-	modTime, err := time.Parse(time.RFC3339, gjson.GetBytes(gwMetaBuf, "stat.modTime").String())
-	if err != nil {
-		return si, err
-	}
-	stat.ModTime = modTime
-	// obtain Stat.Size .
-	stat.Size = gjson.GetBytes(gwMetaBuf, "stat.size").Int()
-	return stat, nil
-}
-
-// parses gateway metadata version from metadata json
-func parseGWVersion(gwMetaBuf []byte) string {
-	return gjson.GetBytes(gwMetaBuf, "version").String()
-}
-
-// parses gateway ETag from metadata json
-func parseGWETag(gwMetaBuf []byte) string {
-	return gjson.GetBytes(gwMetaBuf, "etag").String()
-}
-
-// parses gateway metadata format from metadata json
-func parseGWFormat(gwMetaBuf []byte) string {
-	return gjson.GetBytes(gwMetaBuf, "format").String()
-}
-
-// parses gateway metadata json to get list of ObjectPartInfo
-func parseGWParts(gwMetaBuf []byte) []minio.ObjectPartInfo {
-	// Parse the GW Parts.
-	partsResult := gjson.GetBytes(gwMetaBuf, "parts").Array()
-	partInfo := make([]minio.ObjectPartInfo, len(partsResult))
-	for i, p := range partsResult {
-		info := minio.ObjectPartInfo{}
-		info.Number = int(p.Get("number").Int())
-		info.Name = p.Get("name").String()
-		info.ETag = p.Get("etag").String()
-		info.Size = p.Get("size").Int()
-		partInfo[i] = info
-	}
-	return partInfo
-}
-
-// parses gateway metadata json to get the metadata map
-func parseGWMetaMap(gwMetaBuf []byte) map[string]string {
-	// Get gwMetaV1.Meta map.
-	metaMapResult := gjson.GetBytes(gwMetaBuf, "meta").Map()
-	metaMap := make(map[string]string)
-	for key, valResult := range metaMapResult {
-		metaMap[key] = valResult.String()
-	}
-	return metaMap
-}
-
-// Constructs GWMetaV1 using `gjson` lib to retrieve each field.
-func gwMetaUnmarshalJSON(ctx context.Context, gwMetaBuf []byte) (gwMeta gwMetaV1, e error) {
-	// obtain version.
-	gwMeta.Version = parseGWVersion(gwMetaBuf)
-	// obtain format.
-	gwMeta.Format = parseGWFormat(gwMetaBuf)
-	// Parse gwMetaV1.Stat .
-	stat, err := parseGWStat(gwMetaBuf)
-	if err != nil {
-		logger.LogIf(ctx, err)
-		return gwMeta, err
-	}
-	gwMeta.ETag = parseGWETag(gwMetaBuf)
-	gwMeta.Stat = stat
-
-	// Parse the GW Parts.
-	gwMeta.Parts = parseGWParts(gwMetaBuf)
-	// parse gwMetaV1.
-	gwMeta.Meta = parseGWMetaMap(gwMetaBuf)
-
-	return gwMeta, nil
+// Constructs GWMetaV1 using `jsoniter` lib to retrieve each field.
+func gwMetaUnmarshalJSON(ctx context.Context, gwMetaBuf []byte) (gwMeta gwMetaV1, err error) {
+	var json = jsoniter.ConfigCompatibleWithStandardLibrary
+	err = json.Unmarshal(gwMetaBuf, &gwMeta)
+	return gwMeta, err
 }
 
 // readGWMeta reads `dare.meta` and returns back GW metadata structure.
@@ -234,5 +172,5 @@ func getGWMetadata(ctx context.Context, bucket, prefix string, gwMeta gwMetaV1) 
 	if err != nil {
 		return nil, err
 	}
-	return minio.NewPutObjReader(hashReader, nil, nil), nil
+	return minio.NewPutObjReader(hashReader), nil
 }

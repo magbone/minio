@@ -1,28 +1,66 @@
-/*
- * Minio Cloud Storage, (C) 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package ioutil
 
 import (
 	"bytes"
+	"context"
 	"io"
 	goioutil "io/ioutil"
 	"os"
 	"testing"
+	"time"
 )
+
+type sleepWriter struct {
+	timeout time.Duration
+}
+
+func (w *sleepWriter) Write(p []byte) (n int, err error) {
+	time.Sleep(w.timeout)
+	return len(p), nil
+}
+
+func (w *sleepWriter) Close() error {
+	return nil
+}
+
+func TestDeadlineWriter(t *testing.T) {
+	w := NewDeadlineWriter(&sleepWriter{timeout: 500 * time.Millisecond}, 450*time.Millisecond)
+	_, err := w.Write([]byte("1"))
+	w.Close()
+	if err != context.Canceled {
+		t.Error("DeadlineWriter shouldn't be successful - should return context.Canceled")
+	}
+	_, err = w.Write([]byte("1"))
+	if err != context.Canceled {
+		t.Error("DeadlineWriter shouldn't be successful - should return context.Canceled")
+	}
+	w = NewDeadlineWriter(&sleepWriter{timeout: 100 * time.Millisecond}, 600*time.Millisecond)
+	n, err := w.Write([]byte("abcd"))
+	w.Close()
+	if err != nil {
+		t.Errorf("DeadlineWriter should succeed but failed with %s", err)
+	}
+	if n != 4 {
+		t.Errorf("DeadlineWriter should succeed but should have only written 4 bytes, but returned %d instead", n)
+	}
+}
 
 func TestCloseOnWriter(t *testing.T) {
 	writer := WriteOnClose(goioutil.Discard)
@@ -61,7 +99,7 @@ func TestAppendFile(t *testing.T) {
 	f.WriteString("bbbbbbbbbb")
 	f.Close()
 
-	if err = AppendFile(name1, name2); err != nil {
+	if err = AppendFile(name1, name2, false); err != nil {
 		t.Error(err)
 	}
 
@@ -99,5 +137,36 @@ func TestSkipReader(t *testing.T) {
 		if string(b) != testCase.expected {
 			t.Errorf("Case %d: Got wrong result: %v", i, string(b))
 		}
+	}
+}
+
+func TestSameFile(t *testing.T) {
+	f, err := goioutil.TempFile("", "")
+	if err != nil {
+		t.Errorf("Error creating tmp file: %v", err)
+	}
+	tmpFile := f.Name()
+	f.Close()
+	defer os.Remove(f.Name())
+	fi1, err := os.Stat(tmpFile)
+	if err != nil {
+		t.Fatalf("Error Stat(): %v", err)
+	}
+	fi2, err := os.Stat(tmpFile)
+	if err != nil {
+		t.Fatalf("Error Stat(): %v", err)
+	}
+	if !SameFile(fi1, fi2) {
+		t.Fatal("Expected the files to be same")
+	}
+	if err = goioutil.WriteFile(tmpFile, []byte("aaa"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	fi2, err = os.Stat(tmpFile)
+	if err != nil {
+		t.Fatalf("Error Stat(): %v", err)
+	}
+	if SameFile(fi1, fi2) {
+		t.Fatal("Expected the files not to be same")
 	}
 }

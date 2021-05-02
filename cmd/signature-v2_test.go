@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -52,8 +53,8 @@ func TestDoesPresignedV2SignatureMatch(t *testing.T) {
 	now := UTCNow()
 
 	var (
-		accessKey = globalServerConfig.GetCredential().AccessKey
-		secretKey = globalServerConfig.GetCredential().SecretKey
+		accessKey = globalActiveCred.AccessKey
+		secretKey = globalActiveCred.SecretKey
 	)
 	testCases := []struct {
 		queryParams map[string]string
@@ -169,7 +170,7 @@ func TestValidateV2AuthHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	accessID := globalServerConfig.GetCredential().AccessKey
+	accessID := globalActiveCred.AccessKey
 	testCases := []struct {
 		authString    string
 		expectedError APIErrorCode
@@ -248,7 +249,7 @@ func TestDoesPolicySignatureV2Match(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	creds := globalServerConfig.GetCredential()
+	creds := globalActiveCred
 	policy := "policy"
 	testCases := []struct {
 		accessKey string
@@ -265,7 +266,7 @@ func TestDoesPolicySignatureV2Match(t *testing.T) {
 		formValues.Set("Awsaccesskeyid", test.accessKey)
 		formValues.Set("Signature", test.signature)
 		formValues.Set("Policy", test.policy)
-		errCode := doesPolicySignatureV2Match(formValues)
+		_, errCode := doesPolicySignatureV2Match(formValues)
 		if errCode != test.errCode {
 			t.Fatalf("(%d) expected to get %s, instead got %s", i+1, niceError(test.errCode), niceError(errCode))
 		}

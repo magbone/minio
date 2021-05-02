@@ -1,102 +1,124 @@
-/*
- * Minio Cloud Storage, (C) 2015, 2016 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
-import (
-	"errors"
-	"fmt"
-)
+import "errors"
 
 // errUnexpected - unexpected error, requires manual intervention.
-var errUnexpected = errors.New("Unexpected error, please report this issue at https://github.com/minio/minio/issues")
+var errUnexpected = StorageErr("unexpected error, please report this issue at https://github.com/minio/minio/issues")
 
 // errCorruptedFormat - corrupted backend format.
-var errCorruptedFormat = errors.New("corrupted backend format, please join https://slack.minio.io for assistance")
+var errCorruptedFormat = StorageErr("corrupted backend format, specified disk mount has unexpected previous content")
 
 // errUnformattedDisk - unformatted disk found.
-var errUnformattedDisk = errors.New("unformatted disk found")
+var errUnformattedDisk = StorageErr("unformatted disk found")
+
+// errInconsistentDisk - inconsistent disk found.
+var errInconsistentDisk = StorageErr("inconsistent disk found")
+
+// errUnsupporteDisk - when disk does not support O_DIRECT flag.
+var errUnsupportedDisk = StorageErr("disk does not support O_DIRECT")
 
 // errDiskFull - cannot create volume or files when disk is full.
-var errDiskFull = errors.New("disk path full")
+var errDiskFull = StorageErr("disk path full")
+
+// errDiskNotDir - cannot use storage disk if its not a directory
+var errDiskNotDir = StorageErr("disk is not directory or mountpoint")
 
 // errDiskNotFound - cannot find the underlying configured disk anymore.
-var errDiskNotFound = errors.New("disk not found")
+var errDiskNotFound = StorageErr("disk not found")
 
 // errFaultyRemoteDisk - remote disk is faulty.
-var errFaultyRemoteDisk = errors.New("remote disk is faulty")
+var errFaultyRemoteDisk = StorageErr("remote disk is faulty")
 
 // errFaultyDisk - disk is faulty.
-var errFaultyDisk = errors.New("disk is faulty")
+var errFaultyDisk = StorageErr("disk is faulty")
 
 // errDiskAccessDenied - we don't have write permissions on disk.
-var errDiskAccessDenied = errors.New("disk access denied")
+var errDiskAccessDenied = StorageErr("disk access denied")
 
 // errFileNotFound - cannot find the file.
-var errFileNotFound = errors.New("file not found")
+var errFileNotFound = StorageErr("file not found")
+
+// errFileNotFound - cannot find requested file version.
+var errFileVersionNotFound = StorageErr("file version not found")
+
+// errTooManyOpenFiles - too many open files.
+var errTooManyOpenFiles = StorageErr("too many open files, please increase 'ulimit -n'")
 
 // errFileNameTooLong - given file name is too long than supported length.
-var errFileNameTooLong = errors.New("file name too long")
+var errFileNameTooLong = StorageErr("file name too long")
 
 // errVolumeExists - cannot create same volume again.
-var errVolumeExists = errors.New("volume already exists")
+var errVolumeExists = StorageErr("volume already exists")
 
 // errIsNotRegular - not of regular file type.
-var errIsNotRegular = errors.New("not of regular file type")
+var errIsNotRegular = StorageErr("not of regular file type")
+
+// errPathNotFound - cannot find the path.
+var errPathNotFound = StorageErr("path not found")
 
 // errVolumeNotFound - cannot find the volume.
-var errVolumeNotFound = errors.New("volume not found")
+var errVolumeNotFound = StorageErr("volume not found")
 
 // errVolumeNotEmpty - volume not empty.
-var errVolumeNotEmpty = errors.New("volume is not empty")
+var errVolumeNotEmpty = StorageErr("volume is not empty")
 
 // errVolumeAccessDenied - cannot access volume, insufficient permissions.
-var errVolumeAccessDenied = errors.New("volume access denied")
+var errVolumeAccessDenied = StorageErr("volume access denied")
 
-// errVolumeAccessDenied - cannot access file, insufficient permissions.
-var errFileAccessDenied = errors.New("file access denied")
+// errFileAccessDenied - cannot access file, insufficient permissions.
+var errFileAccessDenied = StorageErr("file access denied")
+
+// errFileCorrupt - file has an unexpected size, or is not readable
+var errFileCorrupt = StorageErr("file is corrupted")
+
+// errFileParentIsFile - cannot have overlapping objects, parent is already a file.
+var errFileParentIsFile = StorageErr("parent is a file")
 
 // errBitrotHashAlgoInvalid - the algo for bit-rot hash
 // verification is empty or invalid.
-var errBitrotHashAlgoInvalid = errors.New("bit-rot hash algorithm is invalid")
+var errBitrotHashAlgoInvalid = StorageErr("bit-rot hash algorithm is invalid")
 
 // errCrossDeviceLink - rename across devices not allowed.
-var errCrossDeviceLink = errors.New("Rename across devices not allowed, please fix your backend configuration")
+var errCrossDeviceLink = StorageErr("Rename across devices not allowed, please fix your backend configuration")
 
 // errMinDiskSize - cannot create volume or files when disk size is less than threshold.
-var errMinDiskSize = errors.New("The disk size is less than the minimum threshold")
+var errMinDiskSize = StorageErr("The disk size is less than 900MiB threshold")
 
 // errLessData - returned when less data available than what was requested.
-var errLessData = errors.New("less data available than what was requested")
+var errLessData = StorageErr("less data available than what was requested")
 
 // errMoreData = returned when more data was sent by the caller than what it was supposed to.
-var errMoreData = errors.New("more data was sent than what was advertised")
+var errMoreData = StorageErr("more data was sent than what was advertised")
 
-// hashMisMatchError - represents a bit-rot hash verification failure
-// error.
-type hashMismatchError struct {
-	expected string
-	computed string
-}
+// indicates readDirFn to return without further applying the fn()
+var errDoneForNow = errors.New("done for now")
 
-// error method for the hashMismatchError
-func (h hashMismatchError) Error() string {
-	return fmt.Sprintf(
-		"Bitrot verification mismatch - expected %v, received %v",
-		h.expected, h.computed)
+// errSkipFile returned by the fn() for readDirFn() when it needs
+// to proceed to next entry.
+var errSkipFile = errors.New("skip this file")
+
+// StorageErr represents error generated by xlStorage call.
+type StorageErr string
+
+func (h StorageErr) Error() string {
+	return string(h)
 }
 
 // Collection of basic errors.
@@ -107,3 +129,41 @@ var baseErrs = []error{
 }
 
 var baseIgnoredErrs = baseErrs
+
+// Is a one place function which converts all os.PathError
+// into a more FS object layer friendly form, converts
+// known errors into their typed form for top level
+// interpretation.
+func osErrToFileErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if osIsNotExist(err) {
+		return errFileNotFound
+	}
+	if osIsPermission(err) {
+		return errFileAccessDenied
+	}
+	if isSysErrNotDir(err) || isSysErrIsDir(err) {
+		return errFileNotFound
+	}
+	if isSysErrPathNotFound(err) {
+		return errFileNotFound
+	}
+	if isSysErrTooManyFiles(err) {
+		return errTooManyOpenFiles
+	}
+	if isSysErrHandleInvalid(err) {
+		return errFileNotFound
+	}
+	if isSysErrIO(err) {
+		return errFaultyDisk
+	}
+	if isSysErrInvalidArg(err) {
+		return errUnsupportedDisk
+	}
+	if isSysErrNoSpace(err) {
+		return errDiskFull
+	}
+	return err
+}

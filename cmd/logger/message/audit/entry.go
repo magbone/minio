@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package audit
 
@@ -21,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
+	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/minio/pkg/handlers"
 )
 
@@ -33,12 +34,15 @@ type Entry struct {
 	Version      string `json:"version"`
 	DeploymentID string `json:"deploymentid,omitempty"`
 	Time         string `json:"time"`
+	Trigger      string `json:"trigger"`
 	API          struct {
-		Name       string `json:"name,omitempty"`
-		Bucket     string `json:"bucket,omitempty"`
-		Object     string `json:"object,omitempty"`
-		Status     string `json:"status,omitempty"`
-		StatusCode int    `json:"statusCode,omitempty"`
+		Name            string `json:"name,omitempty"`
+		Bucket          string `json:"bucket,omitempty"`
+		Object          string `json:"object,omitempty"`
+		Status          string `json:"status,omitempty"`
+		StatusCode      int    `json:"statusCode,omitempty"`
+		TimeToFirstByte string `json:"timeToFirstByte,omitempty"`
+		TimeToResponse  string `json:"timeToResponse,omitempty"`
 	} `json:"api"`
 	RemoteHost string                 `json:"remotehost,omitempty"`
 	RequestID  string                 `json:"requestID,omitempty"`
@@ -47,46 +51,51 @@ type Entry struct {
 	ReqQuery   map[string]string      `json:"requestQuery,omitempty"`
 	ReqHeader  map[string]string      `json:"requestHeader,omitempty"`
 	RespHeader map[string]string      `json:"responseHeader,omitempty"`
+	Tags       map[string]interface{} `json:"tags,omitempty"`
 }
 
-// ToEntry - constructs an audit entry object.
-func ToEntry(w http.ResponseWriter, r *http.Request, api string, statusCode int, reqClaims map[string]interface{}) Entry {
-	vars := mux.Vars(r)
-	bucket := vars["bucket"]
-	object := vars["object"]
+// NewEntry - constructs an audit entry object with some fields filled
+func NewEntry(deploymentID string) Entry {
+	return Entry{
+		Version:      Version,
+		DeploymentID: deploymentID,
+		Time:         time.Now().UTC().Format(time.RFC3339Nano),
+	}
+}
 
-	reqQuery := make(map[string]string)
-	for k, v := range r.URL.Query() {
+// ToEntry - constructs an audit entry from a http request
+func ToEntry(w http.ResponseWriter, r *http.Request, reqClaims map[string]interface{}, deploymentID string) Entry {
+
+	entry := NewEntry(deploymentID)
+
+	entry.RemoteHost = handlers.GetSourceIP(r)
+	entry.UserAgent = r.UserAgent()
+	entry.ReqClaims = reqClaims
+
+	q := r.URL.Query()
+	reqQuery := make(map[string]string, len(q))
+	for k, v := range q {
 		reqQuery[k] = strings.Join(v, ",")
 	}
-	reqHeader := make(map[string]string)
+	entry.ReqQuery = reqQuery
+
+	reqHeader := make(map[string]string, len(r.Header))
 	for k, v := range r.Header {
 		reqHeader[k] = strings.Join(v, ",")
 	}
-	respHeader := make(map[string]string)
-	for k, v := range w.Header() {
+	entry.ReqHeader = reqHeader
+
+	wh := w.Header()
+	entry.RequestID = wh.Get(xhttp.AmzRequestID)
+	respHeader := make(map[string]string, len(wh))
+	for k, v := range wh {
 		respHeader[k] = strings.Join(v, ",")
 	}
-	respHeader["Etag"] = strings.Trim(respHeader["Etag"], `"`)
+	entry.RespHeader = respHeader
 
-	entry := Entry{
-		Version:      Version,
-		DeploymentID: w.Header().Get("x-minio-deployment-id"),
-		RemoteHost:   handlers.GetSourceIP(r),
-		RequestID:    w.Header().Get("x-amz-request-id"),
-		UserAgent:    r.UserAgent(),
-		Time:         time.Now().UTC().Format(time.RFC3339Nano),
-		ReqQuery:     reqQuery,
-		ReqHeader:    reqHeader,
-		ReqClaims:    reqClaims,
-		RespHeader:   respHeader,
+	if etag := respHeader[xhttp.ETag]; etag != "" {
+		respHeader[xhttp.ETag] = strings.Trim(etag, `"`)
 	}
-
-	entry.API.Name = api
-	entry.API.Bucket = bucket
-	entry.API.Object = object
-	entry.API.Status = http.StatusText(statusCode)
-	entry.API.StatusCode = statusCode
 
 	return entry
 }

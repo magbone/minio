@@ -1,24 +1,27 @@
-/*
- * Minio Cloud Storage, (C) 2015, 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
 	"net/http"
 	"testing"
+
+	xhttp "github.com/minio/minio/cmd/http"
 )
 
 // TestSkipContentSha256Cksum - Test validate the logic which decides whether
@@ -70,7 +73,7 @@ func TestSkipContentSha256Cksum(t *testing.T) {
 	for i, testCase := range testCases {
 		// creating an input HTTP request.
 		// Only the headers are relevant for this particular test.
-		inputReq, err := http.NewRequest("GET", "http://example.com", nil)
+		inputReq, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
 		if err != nil {
 			t.Fatalf("Error initializing input HTTP request: %v", err)
 		}
@@ -127,13 +130,13 @@ func TestExtractSignedHeaders(t *testing.T) {
 	// If the `expect` key exists in the signed headers then golang server would have stripped out the value, expecting the `expect` header set to `100-continue` in the result.
 	signedHeaders = append(signedHeaders, "expect")
 	// expected header values.
-	expectedHost := "play.minio.io:9000"
+	expectedHost := "play.min.io:9000"
 	expectedContentSha256 := "1234abcd"
 	expectedTime := UTCNow().Format(iso8601Format)
 	expectedTransferEncoding := "gzip"
 	expectedExpect := "100-continue"
 
-	r, err := http.NewRequest("GET", "http://play.minio.io:9000", nil)
+	r, err := http.NewRequest(http.MethodGet, "http://play.min.io:9000", nil)
 	if err != nil {
 		t.Fatal("Unable to create http.Request :", err)
 	}
@@ -145,6 +148,22 @@ func TestExtractSignedHeaders(t *testing.T) {
 	inputHeader.Set("x-amz-date", expectedTime)
 	// calling the function being tested.
 	extractedSignedHeaders, errCode := extractSignedHeaders(signedHeaders, r)
+	if errCode != ErrNone {
+		t.Fatalf("Expected the APIErrorCode to be %d, but got %d", ErrNone, errCode)
+	}
+
+	inputQuery := r.URL.Query()
+	// case where some headers need to get from request query
+	signedHeaders = append(signedHeaders, "x-amz-server-side-encryption")
+	// expect to fail with `ErrUnsignedHeaders` because couldn't find some header
+	_, errCode = extractSignedHeaders(signedHeaders, r)
+	if errCode != ErrUnsignedHeaders {
+		t.Fatalf("Expected the APIErrorCode to %d, but got %d", ErrUnsignedHeaders, errCode)
+	}
+	// set headers value through Get parameter
+	inputQuery.Add("x-amz-server-side-encryption", xhttp.AmzEncryptionAES)
+	r.URL.RawQuery = inputQuery.Encode()
+	_, errCode = extractSignedHeaders(signedHeaders, r)
 	if errCode != ErrNone {
 		t.Fatalf("Expected the APIErrorCode to be %d, but got %d", ErrNone, errCode)
 	}
@@ -241,14 +260,14 @@ func TestGetContentSha256Cksum(t *testing.T) {
 	}
 
 	for i, testCase := range testCases {
-		r, err := http.NewRequest("GET", "http://localhost/?"+testCase.q, nil)
+		r, err := http.NewRequest(http.MethodGet, "http://localhost/?"+testCase.q, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if testCase.h != "" {
 			r.Header.Set("x-amz-content-sha256", testCase.h)
 		}
-		got := getContentSha256Cksum(r)
+		got := getContentSha256Cksum(r, serviceS3)
 		if got != testCase.expected {
 			t.Errorf("Test %d: got:%s expected:%s", i+1, got, testCase.expected)
 		}

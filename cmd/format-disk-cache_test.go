@@ -1,36 +1,27 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
 	"context"
-	"io"
 	"os"
 	"testing"
 )
-
-// Returns format.Cache.Version
-func formatCacheGetVersion(r io.ReadSeeker) (string, error) {
-	format := &formatCacheVersionDetect{}
-	if err := jsonLoad(r, format); err != nil {
-		return "", err
-	}
-	return format.Cache.Version, nil
-}
 
 // TestDiskCacheFormat - tests initFormatCache, formatMetaGetFormatBackendCache, formatCacheGetVersion.
 func TestDiskCacheFormat(t *testing.T) {
@@ -46,7 +37,7 @@ func TestDiskCacheFormat(t *testing.T) {
 	}
 	// Do the basic sanity checks to check if initFormatCache() did its job.
 	cacheFormatPath := pathJoin(fsDirs[0], minioMetaBucket, formatConfigFile)
-	f, err := os.OpenFile(cacheFormatPath, os.O_RDWR, 0)
+	f, err := os.OpenFile(cacheFormatPath, os.O_RDWR|os.O_SYNC, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,8 +46,8 @@ func TestDiskCacheFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != formatCacheVersionV1 {
-		t.Fatalf(`expected: %s, got: %s`, formatCacheVersionV1, version)
+	if version != formatCacheVersionV2 {
+		t.Fatalf(`expected: %s, got: %s`, formatCacheVersionV2, version)
 	}
 
 	// Corrupt the format.json file and test the functions.
@@ -68,7 +59,7 @@ func TestDiskCacheFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err = loadAndValidateCacheFormat(context.Background(), fsDirs); err == nil {
+	if _, _, err = loadAndValidateCacheFormat(context.Background(), fsDirs); err == nil {
 		t.Fatal("expected to fail")
 	}
 
@@ -81,15 +72,15 @@ func TestDiskCacheFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err = loadAndValidateCacheFormat(context.Background(), fsDirs); err == nil {
+	if _, _, err = loadAndValidateCacheFormat(context.Background(), fsDirs); err == nil {
 		t.Fatal("expected to fail")
 	}
 }
 
 // generates a valid format.json for Cache backend.
-func genFormatCacheValid() []*formatCacheV1 {
+func genFormatCacheValid() []*formatCacheV2 {
 	disks := make([]string, 8)
-	formatConfigs := make([]*formatCacheV1, 8)
+	formatConfigs := make([]*formatCacheV2, 8)
 	for index := range disks {
 		disks[index] = mustGetUUID()
 	}
@@ -97,7 +88,7 @@ func genFormatCacheValid() []*formatCacheV1 {
 		format := &formatCacheV1{}
 		format.Version = formatMetaVersion1
 		format.Format = formatCache
-		format.Cache.Version = formatCacheVersionV1
+		format.Cache.Version = formatCacheVersionV2
 		format.Cache.This = disks[index]
 		format.Cache.Disks = disks
 		formatConfigs[index] = format
@@ -106,9 +97,9 @@ func genFormatCacheValid() []*formatCacheV1 {
 }
 
 // generates a invalid format.json version for Cache backend.
-func genFormatCacheInvalidVersion() []*formatCacheV1 {
+func genFormatCacheInvalidVersion() []*formatCacheV2 {
 	disks := make([]string, 8)
-	formatConfigs := make([]*formatCacheV1, 8)
+	formatConfigs := make([]*formatCacheV2, 8)
 	for index := range disks {
 		disks[index] = mustGetUUID()
 	}
@@ -128,14 +119,14 @@ func genFormatCacheInvalidVersion() []*formatCacheV1 {
 }
 
 // generates a invalid format.json version for Cache backend.
-func genFormatCacheInvalidFormat() []*formatCacheV1 {
+func genFormatCacheInvalidFormat() []*formatCacheV2 {
 	disks := make([]string, 8)
-	formatConfigs := make([]*formatCacheV1, 8)
+	formatConfigs := make([]*formatCacheV2, 8)
 	for index := range disks {
 		disks[index] = mustGetUUID()
 	}
 	for index := range disks {
-		format := &formatCacheV1{}
+		format := &formatCacheV2{}
 		format.Version = formatMetaVersion1
 		format.Format = formatCache
 		format.Cache.Version = formatCacheVersionV1
@@ -150,14 +141,14 @@ func genFormatCacheInvalidFormat() []*formatCacheV1 {
 }
 
 // generates a invalid format.json version for Cache backend.
-func genFormatCacheInvalidCacheVersion() []*formatCacheV1 {
+func genFormatCacheInvalidCacheVersion() []*formatCacheV2 {
 	disks := make([]string, 8)
-	formatConfigs := make([]*formatCacheV1, 8)
+	formatConfigs := make([]*formatCacheV2, 8)
 	for index := range disks {
 		disks[index] = mustGetUUID()
 	}
 	for index := range disks {
-		format := &formatCacheV1{}
+		format := &formatCacheV2{}
 		format.Version = formatMetaVersion1
 		format.Format = formatCache
 		format.Cache.Version = formatCacheVersionV1
@@ -172,17 +163,17 @@ func genFormatCacheInvalidCacheVersion() []*formatCacheV1 {
 }
 
 // generates a invalid format.json version for Cache backend.
-func genFormatCacheInvalidDisksCount() []*formatCacheV1 {
+func genFormatCacheInvalidDisksCount() []*formatCacheV2 {
 	disks := make([]string, 7)
-	formatConfigs := make([]*formatCacheV1, 8)
+	formatConfigs := make([]*formatCacheV2, 8)
 	for index := range disks {
 		disks[index] = mustGetUUID()
 	}
 	for index := range disks {
-		format := &formatCacheV1{}
+		format := &formatCacheV2{}
 		format.Version = formatMetaVersion1
 		format.Format = formatCache
-		format.Cache.Version = formatCacheVersionV1
+		format.Cache.Version = formatCacheVersionV2
 		format.Cache.This = disks[index]
 		format.Cache.Disks = disks
 		formatConfigs[index] = format
@@ -191,9 +182,9 @@ func genFormatCacheInvalidDisksCount() []*formatCacheV1 {
 }
 
 // generates a invalid format.json Disks for Cache backend.
-func genFormatCacheInvalidDisks() []*formatCacheV1 {
+func genFormatCacheInvalidDisks() []*formatCacheV2 {
 	disks := make([]string, 8)
-	formatConfigs := make([]*formatCacheV1, 8)
+	formatConfigs := make([]*formatCacheV2, 8)
 	for index := range disks {
 		disks[index] = mustGetUUID()
 	}
@@ -201,7 +192,7 @@ func genFormatCacheInvalidDisks() []*formatCacheV1 {
 		format := &formatCacheV1{}
 		format.Version = formatMetaVersion1
 		format.Format = formatCache
-		format.Cache.Version = formatCacheVersionV1
+		format.Cache.Version = formatCacheVersionV2
 		format.Cache.This = disks[index]
 		format.Cache.Disks = disks
 		formatConfigs[index] = format
@@ -226,7 +217,7 @@ func genFormatCacheInvalidThis() []*formatCacheV1 {
 		format := &formatCacheV1{}
 		format.Version = formatMetaVersion1
 		format.Format = formatCache
-		format.Cache.Version = formatCacheVersionV1
+		format.Cache.Version = formatCacheVersionV2
 		format.Cache.This = disks[index]
 		format.Cache.Disks = disks
 		formatConfigs[index] = format
@@ -238,9 +229,9 @@ func genFormatCacheInvalidThis() []*formatCacheV1 {
 }
 
 // generates a invalid format.json Disk UUID in wrong order for Cache backend.
-func genFormatCacheInvalidDisksOrder() []*formatCacheV1 {
+func genFormatCacheInvalidDisksOrder() []*formatCacheV2 {
 	disks := make([]string, 8)
-	formatConfigs := make([]*formatCacheV1, 8)
+	formatConfigs := make([]*formatCacheV2, 8)
 	for index := range disks {
 		disks[index] = mustGetUUID()
 	}
@@ -248,7 +239,7 @@ func genFormatCacheInvalidDisksOrder() []*formatCacheV1 {
 		format := &formatCacheV1{}
 		format.Version = formatMetaVersion1
 		format.Format = formatCache
-		format.Cache.Version = formatCacheVersionV1
+		format.Cache.Version = formatCacheVersionV2
 		format.Cache.This = disks[index]
 		format.Cache.Disks = disks
 		formatConfigs[index] = format
@@ -319,7 +310,7 @@ func TestFormatCache(t *testing.T) {
 	}
 
 	for i, testCase := range testCases {
-		err := validateCacheFormats(context.Background(), testCase.formatConfigs)
+		err := validateCacheFormats(context.Background(), false, testCase.formatConfigs)
 		if err != nil && testCase.shouldPass {
 			t.Errorf("Test %d: Expected to pass but failed with %s", i+1, err)
 		}

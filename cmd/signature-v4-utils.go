@@ -1,29 +1,36 @@
-/*
- * Minio Cloud Storage, (C) 2015, 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
+	"bytes"
 	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"io/ioutil"
 	"net/http"
 	"strconv"
 	"strings"
 
+	xhttp "github.com/minio/minio/cmd/http"
+	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
-	"github.com/minio/sha256-simd"
 )
 
 // http Header "x-amz-content-sha256" == "UNSIGNED-PAYLOAD" indicates that the
@@ -39,12 +46,12 @@ func skipContentSha256Cksum(r *http.Request) bool {
 	)
 
 	if isRequestPresignedSignatureV4(r) {
-		v, ok = r.URL.Query()["X-Amz-Content-Sha256"]
+		v, ok = r.URL.Query()[xhttp.AmzContentSha256]
 		if !ok {
-			v, ok = r.Header["X-Amz-Content-Sha256"]
+			v, ok = r.Header[xhttp.AmzContentSha256]
 		}
 	} else {
-		v, ok = r.Header["X-Amz-Content-Sha256"]
+		v, ok = r.Header[xhttp.AmzContentSha256]
 	}
 
 	// If x-amz-content-sha256 is set and the value is not
@@ -53,7 +60,17 @@ func skipContentSha256Cksum(r *http.Request) bool {
 }
 
 // Returns SHA256 for calculating canonical-request.
-func getContentSha256Cksum(r *http.Request) string {
+func getContentSha256Cksum(r *http.Request, stype serviceType) string {
+	if stype == serviceSTS {
+		payload, err := ioutil.ReadAll(io.LimitReader(r.Body, stsRequestBodyLimit))
+		if err != nil {
+			logger.CriticalIf(GlobalContext, err)
+		}
+		sum256 := sha256.Sum256(payload)
+		r.Body = ioutil.NopCloser(bytes.NewReader(payload))
+		return hex.EncodeToString(sum256[:])
+	}
+
 	var (
 		defaultSha256Cksum string
 		v                  []string
@@ -65,15 +82,15 @@ func getContentSha256Cksum(r *http.Request) string {
 		// X-Amz-Content-Sha256, if not set in presigned requests, checksum
 		// will default to 'UNSIGNED-PAYLOAD'.
 		defaultSha256Cksum = unsignedPayload
-		v, ok = r.URL.Query()["X-Amz-Content-Sha256"]
+		v, ok = r.URL.Query()[xhttp.AmzContentSha256]
 		if !ok {
-			v, ok = r.Header["X-Amz-Content-Sha256"]
+			v, ok = r.Header[xhttp.AmzContentSha256]
 		}
 	} else {
 		// X-Amz-Content-Sha256, if not set in signed requests, checksum
 		// will default to sha256([]byte("")).
 		defaultSha256Cksum = emptySHA256
-		v, ok = r.Header["X-Amz-Content-Sha256"]
+		v, ok = r.Header[xhttp.AmzContentSha256]
 	}
 
 	// We found 'X-Amz-Content-Sha256' return the captured value.
@@ -105,11 +122,8 @@ func isValidRegion(reqRegion string, confRegion string) bool {
 // also returns if the access key is owner/admin.
 func checkKeyValid(accessKey string) (auth.Credentials, bool, APIErrorCode) {
 	var owner = true
-	var cred = globalServerConfig.GetCredential()
+	var cred = globalActiveCred
 	if cred.AccessKey != accessKey {
-		if globalIAMSys == nil {
-			return cred, false, ErrInvalidAccessKeyID
-		}
 		// Check if the access key is part of users credentials.
 		var ok bool
 		if cred, ok = globalIAMSys.GetUser(accessKey); !ok {
@@ -130,6 +144,7 @@ func sumHMAC(key []byte, data []byte) []byte {
 // extractSignedHeaders extract signed headers from Authorization header
 func extractSignedHeaders(signedHeaders []string, r *http.Request) (http.Header, APIErrorCode) {
 	reqHeaders := r.Header
+	reqQueries := r.URL.Query()
 	// find whether "host" is part of list of signed headers.
 	// if not return ErrUnsignedHeaders. "host" is mandatory.
 	if !contains(signedHeaders, "host") {
@@ -140,10 +155,12 @@ func extractSignedHeaders(signedHeaders []string, r *http.Request) (http.Header,
 		// `host` will not be found in the headers, can be found in r.Host.
 		// but its alway necessary that the list of signed headers containing host in it.
 		val, ok := reqHeaders[http.CanonicalHeaderKey(header)]
+		if !ok {
+			// try to set headers from Query String
+			val, ok = reqQueries[header]
+		}
 		if ok {
-			for _, enc := range val {
-				extractedSignedHeaders.Add(header, enc)
-			}
+			extractedSignedHeaders[http.CanonicalHeaderKey(header)] = val
 			continue
 		}
 		switch header {
@@ -170,9 +187,7 @@ func extractSignedHeaders(signedHeaders []string, r *http.Request) (http.Header,
 			extractedSignedHeaders.Set(header, r.Host)
 		case "transfer-encoding":
 			// Go http server removes "host" from Request.Header
-			for _, enc := range r.TransferEncoding {
-				extractedSignedHeaders.Add(header, enc)
-			}
+			extractedSignedHeaders[http.CanonicalHeaderKey(header)] = r.TransferEncoding
 		case "content-length":
 			// Signature-V4 spec excludes Content-Length from signed headers list for signature calculation.
 			// But some clients deviate from this rule. Hence we consider Content-Length for signature

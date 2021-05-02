@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -42,6 +43,39 @@ type AssumedRoleUser struct {
 	// contains filtered or unexported fields
 }
 
+// AssumeRoleResponse contains the result of successful AssumeRole request.
+type AssumeRoleResponse struct {
+	XMLName xml.Name `xml:"https://sts.amazonaws.com/doc/2011-06-15/ AssumeRoleResponse" json:"-"`
+
+	Result           AssumeRoleResult `xml:"AssumeRoleResult"`
+	ResponseMetadata struct {
+		RequestID string `xml:"RequestId,omitempty"`
+	} `xml:"ResponseMetadata,omitempty"`
+}
+
+// AssumeRoleResult - Contains the response to a successful AssumeRole
+// request, including temporary credentials that can be used to make
+// MinIO API requests.
+type AssumeRoleResult struct {
+	// The identifiers for the temporary security credentials that the operation
+	// returns.
+	AssumedRoleUser AssumedRoleUser `xml:",omitempty"`
+
+	// The temporary security credentials, which include an access key ID, a secret
+	// access key, and a security (or session) token.
+	//
+	// Note: The size of the security token that STS APIs return is not fixed. We
+	// strongly recommend that you make no assumptions about the maximum size. As
+	// of this writing, the typical size is less than 4096 bytes, but that can vary.
+	// Also, future updates to AWS might require larger sizes.
+	Credentials auth.Credentials `xml:",omitempty"`
+
+	// A percentage value that indicates the size of the policy in packed form.
+	// The service rejects any policy with a packed size greater than 100 percent,
+	// which means the policy exceeded the allowed space.
+	PackedPolicySize int `xml:",omitempty"`
+}
+
 // AssumeRoleWithWebIdentityResponse contains the result of successful AssumeRoleWithWebIdentity request.
 type AssumeRoleWithWebIdentityResponse struct {
 	XMLName          xml.Name          `xml:"https://sts.amazonaws.com/doc/2011-06-15/ AssumeRoleWithWebIdentityResponse" json:"-"`
@@ -52,7 +86,7 @@ type AssumeRoleWithWebIdentityResponse struct {
 }
 
 // WebIdentityResult - Contains the response to a successful AssumeRoleWithWebIdentity
-// request, including temporary credentials that can be used to make Minio API requests.
+// request, including temporary credentials that can be used to make MinIO API requests.
 type WebIdentityResult struct {
 	// The identifiers for the temporary security credentials that the operation
 	// returns.
@@ -102,7 +136,7 @@ type AssumeRoleWithClientGrantsResponse struct {
 }
 
 // ClientGrantsResult - Contains the response to a successful AssumeRoleWithClientGrants
-// request, including temporary credentials that can be used to make Minio API requests.
+// request, including temporary credentials that can be used to make MinIO API requests.
 type ClientGrantsResult struct {
 	// The identifiers for the temporary security credentials that the operation
 	// returns.
@@ -140,4 +174,20 @@ type ClientGrantsResult struct {
 	// For OpenID Connect ID tokens, this field contains the value returned by the identity
 	// provider as the token's sub (Subject) claim.
 	SubjectFromToken string `xml:",omitempty"`
+}
+
+// AssumeRoleWithLDAPResponse contains the result of successful
+// AssumeRoleWithLDAPIdentity request
+type AssumeRoleWithLDAPResponse struct {
+	XMLName          xml.Name           `xml:"https://sts.amazonaws.com/doc/2011-06-15/ AssumeRoleWithLDAPIdentityResponse" json:"-"`
+	Result           LDAPIdentityResult `xml:"AssumeRoleWithLDAPIdentityResult"`
+	ResponseMetadata struct {
+		RequestID string `xml:"RequestId,omitempty"`
+	} `xml:"ResponseMetadata,omitempty"`
+}
+
+// LDAPIdentityResult - contains credentials for a successful
+// AssumeRoleWithLDAPIdentity request.
+type LDAPIdentityResult struct {
+	Credentials auth.Credentials `xml:",omitempty"`
 }

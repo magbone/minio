@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package event
 
@@ -24,8 +25,11 @@ import (
 // Target - event target interface
 type Target interface {
 	ID() TargetID
-	Send(Event) error
+	IsActive() (bool, error)
+	Save(Event) error
+	Send(string) error
 	Close() error
+	HasQueueStore() bool
 }
 
 // TargetList - holds list of targets indexed by target ID.
@@ -35,15 +39,17 @@ type TargetList struct {
 }
 
 // Add - adds unique target to target list.
-func (list *TargetList) Add(target Target) error {
+func (list *TargetList) Add(targets ...Target) error {
 	list.Lock()
 	defer list.Unlock()
 
-	if _, ok := list.targets[target.ID()]; ok {
-		return fmt.Errorf("target %v already exists", target.ID())
+	for _, target := range targets {
+		if _, ok := list.targets[target.ID()]; ok {
+			return fmt.Errorf("target %v already exists", target.ID())
+		}
+		list.targets[target.ID()] = target
 	}
 
-	list.targets[target.ID()] = target
 	return nil
 }
 
@@ -56,8 +62,9 @@ func (list *TargetList) Exists(id TargetID) bool {
 	return found
 }
 
-// TargetIDErr returns error associated for a targetID
-type TargetIDErr struct {
+// TargetIDResult returns result of Remove/Send operation, sets err if
+// any for the associated TargetID
+type TargetIDResult struct {
 	// ID where the remove or send were initiated.
 	ID TargetID
 	// Stores any error while removing a target or while sending an event.
@@ -65,40 +72,34 @@ type TargetIDErr struct {
 }
 
 // Remove - closes and removes targets by given target IDs.
-func (list *TargetList) Remove(targetids ...TargetID) <-chan TargetIDErr {
-	errCh := make(chan TargetIDErr)
+func (list *TargetList) Remove(targetIDSet TargetIDSet) {
+	list.Lock()
+	defer list.Unlock()
 
-	go func() {
-		defer close(errCh)
-
-		var wg sync.WaitGroup
-		for _, id := range targetids {
-			list.RLock()
-			target, ok := list.targets[id]
-			list.RUnlock()
-			if ok {
-				wg.Add(1)
-				go func(id TargetID, target Target) {
-					defer wg.Done()
-					if err := target.Close(); err != nil {
-						errCh <- TargetIDErr{
-							ID:  id,
-							Err: err,
-						}
-					}
-				}(id, target)
-			}
-		}
-		wg.Wait()
-
-		list.Lock()
-		for _, id := range targetids {
+	for id := range targetIDSet {
+		target, ok := list.targets[id]
+		if ok {
+			target.Close()
 			delete(list.targets, id)
 		}
-		list.Unlock()
-	}()
+	}
+}
 
-	return errCh
+// Targets - list all targets
+func (list *TargetList) Targets() []Target {
+	if list == nil {
+		return []Target{}
+	}
+
+	list.RLock()
+	defer list.RUnlock()
+
+	targets := []Target{}
+	for _, tgt := range list.targets {
+		targets = append(targets, tgt)
+	}
+
+	return targets
 }
 
 // List - returns available target IDs.
@@ -114,15 +115,18 @@ func (list *TargetList) List() []TargetID {
 	return keys
 }
 
+// TargetMap - returns available targets.
+func (list *TargetList) TargetMap() map[TargetID]Target {
+	list.RLock()
+	defer list.RUnlock()
+	return list.targets
+}
+
 // Send - sends events to targets identified by target IDs.
-func (list *TargetList) Send(event Event, targetIDs ...TargetID) <-chan TargetIDErr {
-	errCh := make(chan TargetIDErr)
-
+func (list *TargetList) Send(event Event, targetIDset TargetIDSet, resCh chan<- TargetIDResult) {
 	go func() {
-		defer close(errCh)
-
 		var wg sync.WaitGroup
-		for _, id := range targetIDs {
+		for id := range targetIDset {
 			list.RLock()
 			target, ok := list.targets[id]
 			list.RUnlock()
@@ -130,19 +134,18 @@ func (list *TargetList) Send(event Event, targetIDs ...TargetID) <-chan TargetID
 				wg.Add(1)
 				go func(id TargetID, target Target) {
 					defer wg.Done()
-					if err := target.Send(event); err != nil {
-						errCh <- TargetIDErr{
-							ID:  id,
-							Err: err,
-						}
+					tgtRes := TargetIDResult{ID: id}
+					if err := target.Save(event); err != nil {
+						tgtRes.Err = err
 					}
+					resCh <- tgtRes
 				}(id, target)
+			} else {
+				resCh <- TargetIDResult{ID: id}
 			}
 		}
 		wg.Wait()
 	}()
-
-	return errCh
 }
 
 // NewTargetList - creates TargetList.

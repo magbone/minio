@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -51,11 +51,14 @@ export const ObjectItem = ({
       </div>
       <div className="fesl-item fesl-item-name">
         <a
-          href="#"
+          href={getDataType(name, contentType) === "folder" ? name : "#"}
           onClick={e => {
             e.preventDefault()
+            // onclick function is passed only when we have a prefix
             if (onClick) {
               onClick()
+            } else {
+              checked ? uncheckObject(name) : checkObject(name)
             }
           }}
         >

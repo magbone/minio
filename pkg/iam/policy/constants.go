@@ -1,23 +1,31 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package iampolicy
 
 import (
-	"github.com/minio/minio/pkg/policy"
+	"github.com/minio/minio/pkg/bucket/policy"
+	"github.com/minio/minio/pkg/bucket/policy/condition"
+)
+
+// Policy claim constants
+const (
+	PolicyName        = "policy"
+	SessionPolicyName = "sessionPolicy"
 )
 
 // ReadWrite - provides full access to all buckets and all objects
@@ -55,6 +63,45 @@ var WriteOnly = Policy{
 			Effect:    policy.Allow,
 			Actions:   NewActionSet(PutObjectAction),
 			Resources: NewResourceSet(NewResource("*", "")),
+		},
+	},
+}
+
+// AdminDiagnostics - provides admin diagnostics access.
+var AdminDiagnostics = Policy{
+	Version: DefaultVersion,
+	Statements: []Statement{
+		{
+			SID:    policy.ID(""),
+			Effect: policy.Allow,
+			Actions: NewActionSet(ProfilingAdminAction,
+				TraceAdminAction, ConsoleLogAdminAction,
+				ServerInfoAdminAction, TopLocksAdminAction,
+				HealthInfoAdminAction, BandwidthMonitorAction,
+				PrometheusAdminAction,
+			),
+			Resources: NewResourceSet(NewResource("*", "")),
+		},
+	},
+}
+
+// Admin - provides admin all-access canned policy
+var Admin = Policy{
+	Version: DefaultVersion,
+	Statements: []Statement{
+		{
+			SID:        policy.ID(""),
+			Effect:     policy.Allow,
+			Actions:    NewActionSet(AllAdminActions),
+			Resources:  NewResourceSet(),
+			Conditions: condition.NewFunctions(),
+		},
+		{
+			SID:        policy.ID(""),
+			Effect:     policy.Allow,
+			Actions:    NewActionSet(AllActions),
+			Resources:  NewResourceSet(NewResource("*", "")),
+			Conditions: condition.NewFunctions(),
 		},
 	},
 }

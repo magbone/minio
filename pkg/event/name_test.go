@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package event
 
@@ -28,9 +29,12 @@ func TestNameExpand(t *testing.T) {
 		name           Name
 		expectedResult []Name
 	}{
-		{ObjectAccessedAll, []Name{ObjectAccessedGet, ObjectAccessedHead}},
-		{ObjectCreatedAll, []Name{ObjectCreatedCompleteMultipartUpload, ObjectCreatedCopy, ObjectCreatedPost, ObjectCreatedPut}},
-		{ObjectRemovedAll, []Name{ObjectRemovedDelete}},
+		{BucketCreated, []Name{BucketCreated}},
+		{BucketRemoved, []Name{BucketRemoved}},
+		{ObjectAccessedAll, []Name{ObjectAccessedGet, ObjectAccessedHead, ObjectAccessedGetRetention, ObjectAccessedGetLegalHold}},
+		{ObjectCreatedAll, []Name{ObjectCreatedCompleteMultipartUpload, ObjectCreatedCopy, ObjectCreatedPost, ObjectCreatedPut,
+			ObjectCreatedPutRetention, ObjectCreatedPutLegalHold, ObjectCreatedPutTagging, ObjectCreatedDeleteTagging}},
+		{ObjectRemovedAll, []Name{ObjectRemovedDelete, ObjectRemovedDeleteMarkerCreated}},
 		{ObjectAccessedHead, []Name{ObjectAccessedHead}},
 	}
 
@@ -38,7 +42,7 @@ func TestNameExpand(t *testing.T) {
 		result := testCase.name.Expand()
 
 		if !reflect.DeepEqual(result, testCase.expectedResult) {
-			t.Fatalf("test %v: result: expected: %v, got: %v", i+1, testCase.expectedResult, result)
+			t.Errorf("test %v: result: expected: %v, got: %v", i+1, testCase.expectedResult, result)
 		}
 	}
 }
@@ -50,6 +54,8 @@ func TestNameString(t *testing.T) {
 		name           Name
 		expectedResult string
 	}{
+		{BucketCreated, "s3:BucketCreated:*"},
+		{BucketRemoved, "s3:BucketRemoved:*"},
 		{ObjectAccessedAll, "s3:ObjectAccessed:*"},
 		{ObjectAccessedGet, "s3:ObjectAccessed:Get"},
 		{ObjectAccessedHead, "s3:ObjectAccessed:Head"},
@@ -60,6 +66,11 @@ func TestNameString(t *testing.T) {
 		{ObjectCreatedPut, "s3:ObjectCreated:Put"},
 		{ObjectRemovedAll, "s3:ObjectRemoved:*"},
 		{ObjectRemovedDelete, "s3:ObjectRemoved:Delete"},
+		{ObjectCreatedPutRetention, "s3:ObjectCreated:PutRetention"},
+		{ObjectCreatedPutLegalHold, "s3:ObjectCreated:PutLegalHold"},
+		{ObjectAccessedGetRetention, "s3:ObjectAccessed:GetRetention"},
+		{ObjectAccessedGetLegalHold, "s3:ObjectAccessed:GetLegalHold"},
+
 		{blankName, ""},
 	}
 

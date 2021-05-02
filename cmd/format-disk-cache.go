@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -21,10 +22,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
+	"path"
+	"path/filepath"
 	"reflect"
+	"strings"
 
+	jsoniter "github.com/json-iterator/go"
 	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/sio"
 )
 
 const (
@@ -33,6 +40,7 @@ const (
 
 	// formatCacheV1.Cache.Version
 	formatCacheVersionV1 = "1"
+	formatCacheVersionV2 = "2"
 
 	formatMetaVersion1 = "1"
 
@@ -56,6 +64,9 @@ type formatCacheV1 struct {
 	} `json:"cache"` // Cache field holds cache format.
 }
 
+// formatCacheV2 is same as formatCacheV1
+type formatCacheV2 = formatCacheV1
+
 // Used to detect the version of "cache" format.
 type formatCacheVersionDetect struct {
 	Cache struct {
@@ -64,17 +75,17 @@ type formatCacheVersionDetect struct {
 }
 
 // Return a slice of format, to be used to format uninitialized disks.
-func newFormatCacheV1(drives []string) []*formatCacheV1 {
+func newFormatCacheV2(drives []string) []*formatCacheV2 {
 	diskCount := len(drives)
 	var disks = make([]string, diskCount)
 
-	var formats = make([]*formatCacheV1, diskCount)
+	var formats = make([]*formatCacheV2, diskCount)
 
 	for i := 0; i < diskCount; i++ {
-		format := &formatCacheV1{}
+		format := &formatCacheV2{}
 		format.Version = formatMetaVersion1
 		format.Format = formatCache
-		format.Cache.Version = formatCacheVersionV1
+		format.Cache.Version = formatCacheVersionV2
 		format.Cache.DistributionAlgo = formatCacheV1DistributionAlgo
 		format.Cache.This = mustGetUUID()
 		formats[i] = format
@@ -85,6 +96,15 @@ func newFormatCacheV1(drives []string) []*formatCacheV1 {
 		format.Cache.Disks = disks
 	}
 	return formats
+}
+
+// Returns formatCache.Cache.Version
+func formatCacheGetVersion(r io.ReadSeeker) (string, error) {
+	format := &formatCacheVersionDetect{}
+	if err := jsonLoad(r, format); err != nil {
+		return "", err
+	}
+	return format.Cache.Version, nil
 }
 
 // Creates a new cache format.json if unformatted.
@@ -110,31 +130,13 @@ func createFormatCache(fsFormatPath string, format *formatCacheV1) error {
 
 // This function creates a cache format file on disk and returns a slice
 // of format cache config
-func initFormatCache(ctx context.Context, drives []string) (formats []*formatCacheV1, err error) {
-	nformats := newFormatCacheV1(drives)
-	for _, drive := range drives {
-		_, err = os.Stat(drive)
-		if err == nil {
-			continue
-		}
-		if !os.IsNotExist(err) {
-			logger.GetReqInfo(ctx).AppendTags("drive", drive)
-			logger.LogIf(ctx, err)
-			return nil, err
-		}
-		if err = os.Mkdir(drive, 0777); err != nil {
-			logger.GetReqInfo(ctx).AppendTags("drive", drive)
-			logger.LogIf(ctx, err)
-			return nil, err
-		}
-	}
+func initFormatCache(ctx context.Context, drives []string) (formats []*formatCacheV2, err error) {
+	nformats := newFormatCacheV2(drives)
 	for i, drive := range drives {
-		if err = os.Mkdir(pathJoin(drive, minioMetaBucket), 0777); err != nil {
-			if !os.IsExist(err) {
-				logger.GetReqInfo(ctx).AppendTags("drive", drive)
-				logger.LogIf(ctx, err)
-				return nil, err
-			}
+		if err = os.MkdirAll(pathJoin(drive, minioMetaBucket), 0777); err != nil {
+			logger.GetReqInfo(ctx).AppendTags("drive", drive)
+			logger.LogIf(ctx, err)
+			return nil, err
 		}
 		cacheFormatPath := pathJoin(drive, minioMetaBucket, formatConfigFile)
 		// Fresh disk - create format.json for this cfs
@@ -147,26 +149,33 @@ func initFormatCache(ctx context.Context, drives []string) (formats []*formatCac
 	return nformats, nil
 }
 
-func loadFormatCache(ctx context.Context, drives []string) ([]*formatCacheV1, error) {
-	formats := make([]*formatCacheV1, len(drives))
+func loadFormatCache(ctx context.Context, drives []string) ([]*formatCacheV2, bool, error) {
+	formats := make([]*formatCacheV2, len(drives))
+	var formatV2 *formatCacheV2
+	migrating := false
 	for i, drive := range drives {
 		cacheFormatPath := pathJoin(drive, minioMetaBucket, formatConfigFile)
-		f, err := os.Open(cacheFormatPath)
+		f, err := os.OpenFile(cacheFormatPath, os.O_RDWR, 0)
+
 		if err != nil {
-			if os.IsNotExist(err) {
+			if osIsNotExist(err) {
 				continue
 			}
 			logger.LogIf(ctx, err)
-			return nil, err
+			return nil, migrating, err
 		}
 		defer f.Close()
 		format, err := formatMetaCacheV1(f)
 		if err != nil {
 			continue
 		}
-		formats[i] = format
+		formatV2 = format
+		if format.Cache.Version != formatCacheVersionV2 {
+			migrating = true
+		}
+		formats[i] = formatV2
 	}
-	return formats, nil
+	return formats, migrating, nil
 }
 
 // unmarshalls the cache format.json into formatCacheV1
@@ -178,26 +187,38 @@ func formatMetaCacheV1(r io.ReadSeeker) (*formatCacheV1, error) {
 	return format, nil
 }
 
-func checkFormatCacheValue(format *formatCacheV1) error {
+func checkFormatCacheValue(format *formatCacheV2, migrating bool) error {
+	if format.Format != formatCache {
+		return fmt.Errorf("Unsupported cache format [%s] found", format.Format)
+	}
+
+	// during migration one or more cache drive(s) formats can be out of sync
+	if migrating {
+		// Validate format version and format type.
+		if format.Version != formatMetaVersion1 {
+			return fmt.Errorf("Unsupported version of cache format [%s] found", format.Version)
+		}
+		if format.Cache.Version != formatCacheVersionV2 && format.Cache.Version != formatCacheVersionV1 {
+			return fmt.Errorf("Unsupported Cache backend format found [%s]", format.Cache.Version)
+		}
+		return nil
+	}
 	// Validate format version and format type.
 	if format.Version != formatMetaVersion1 {
 		return fmt.Errorf("Unsupported version of cache format [%s] found", format.Version)
 	}
-	if format.Format != formatCache {
-		return fmt.Errorf("Unsupported cache format [%s] found", format.Format)
-	}
-	if format.Cache.Version != formatCacheVersionV1 {
+	if format.Cache.Version != formatCacheVersionV2 {
 		return fmt.Errorf("Unsupported Cache backend format found [%s]", format.Cache.Version)
 	}
 	return nil
 }
 
-func checkFormatCacheValues(formats []*formatCacheV1) (int, error) {
+func checkFormatCacheValues(migrating bool, formats []*formatCacheV2) (int, error) {
 	for i, formatCache := range formats {
 		if formatCache == nil {
 			continue
 		}
-		if err := checkFormatCacheValue(formatCache); err != nil {
+		if err := checkFormatCacheValue(formatCache, migrating); err != nil {
 			return i, err
 		}
 		if len(formats) != len(formatCache.Cache.Disks) {
@@ -210,7 +231,7 @@ func checkFormatCacheValues(formats []*formatCacheV1) (int, error) {
 
 // checkCacheDisksConsistency - checks if "This" disk uuid on each disk is consistent with all "Disks" slices
 // across disks.
-func checkCacheDiskConsistency(formats []*formatCacheV1) error {
+func checkCacheDiskConsistency(formats []*formatCacheV2) error {
 	var disks = make([]string, len(formats))
 	// Collect currently available disk uuids.
 	for index, format := range formats {
@@ -236,7 +257,7 @@ func checkCacheDiskConsistency(formats []*formatCacheV1) error {
 }
 
 // checkCacheDisksSliceConsistency - validate cache Disks order if they are consistent.
-func checkCacheDisksSliceConsistency(formats []*formatCacheV1) error {
+func checkCacheDisksSliceConsistency(formats []*formatCacheV2) error {
 	var sentinelDisks []string
 	// Extract first valid Disks slice.
 	for _, format := range formats {
@@ -269,7 +290,7 @@ func findCacheDiskIndex(disk string, disks []string) int {
 }
 
 // validate whether cache drives order has changed
-func validateCacheFormats(ctx context.Context, formats []*formatCacheV1) error {
+func validateCacheFormats(ctx context.Context, migrating bool, formats []*formatCacheV2) error {
 	count := 0
 	for _, format := range formats {
 		if format == nil {
@@ -279,7 +300,7 @@ func validateCacheFormats(ctx context.Context, formats []*formatCacheV1) error {
 	if count == len(formats) {
 		return errors.New("Cache format files missing on all drives")
 	}
-	if _, err := checkFormatCacheValues(formats); err != nil {
+	if _, err := checkFormatCacheValues(migrating, formats); err != nil {
 		logger.LogIf(ctx, err)
 		return err
 	}
@@ -298,7 +319,7 @@ func cacheDrivesUnformatted(drives []string) bool {
 	count := 0
 	for _, drive := range drives {
 		cacheFormatPath := pathJoin(drive, minioMetaBucket, formatConfigFile)
-		if _, err := os.Stat(cacheFormatPath); os.IsNotExist(err) {
+		if _, err := os.Stat(cacheFormatPath); osIsNotExist(err) {
 			count++
 		}
 	}
@@ -308,17 +329,174 @@ func cacheDrivesUnformatted(drives []string) bool {
 // create format.json for each cache drive if fresh disk or load format from disk
 // Then validate the format for all drives in the cache to ensure order
 // of cache drives has not changed.
-func loadAndValidateCacheFormat(ctx context.Context, drives []string) (formats []*formatCacheV1, err error) {
+func loadAndValidateCacheFormat(ctx context.Context, drives []string) (formats []*formatCacheV2, migrating bool, err error) {
 	if cacheDrivesUnformatted(drives) {
 		formats, err = initFormatCache(ctx, drives)
 	} else {
-		formats, err = loadFormatCache(ctx, drives)
+		formats, migrating, err = loadFormatCache(ctx, drives)
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if err = validateCacheFormats(ctx, formats); err != nil {
-		return nil, err
+	if err = validateCacheFormats(ctx, migrating, formats); err != nil {
+		return nil, false, err
 	}
-	return formats, nil
+	return formats, migrating, nil
+}
+
+// reads cached object on disk and writes it back after adding bitrot
+// hashsum per block as per the new disk cache format.
+func migrateCacheData(ctx context.Context, c *diskCache, bucket, object, oldfile, destDir string, metadata map[string]string) error {
+	st, err := os.Stat(oldfile)
+	if err != nil {
+		err = osErrToFileErr(err)
+		return err
+	}
+	readCloser, err := readCacheFileStream(oldfile, 0, st.Size())
+	if err != nil {
+		return err
+	}
+	var reader io.Reader = readCloser
+
+	actualSize := uint64(st.Size())
+	if globalCacheKMS != nil {
+		reader, err = newCacheEncryptReader(readCloser, bucket, object, metadata)
+		if err != nil {
+			return err
+		}
+		actualSize, _ = sio.EncryptedSize(uint64(st.Size()))
+	}
+	_, _, err = c.bitrotWriteToCache(destDir, cacheDataFile, reader, actualSize)
+	return err
+}
+
+// migrate cache contents from old cacheFS format to new backend format
+// new format is flat
+//  sha(bucket,object)/  <== dir name
+//      - part.1         <== data
+//      - cache.json     <== metadata
+func migrateOldCache(ctx context.Context, c *diskCache) error {
+	oldCacheBucketsPath := path.Join(c.dir, minioMetaBucket, "buckets")
+	cacheFormatPath := pathJoin(c.dir, minioMetaBucket, formatConfigFile)
+
+	if _, err := os.Stat(oldCacheBucketsPath); err != nil {
+		// remove .minio.sys sub directories
+		removeAll(path.Join(c.dir, minioMetaBucket, "multipart"))
+		removeAll(path.Join(c.dir, minioMetaBucket, "tmp"))
+		removeAll(path.Join(c.dir, minioMetaBucket, "trash"))
+		removeAll(path.Join(c.dir, minioMetaBucket, "buckets"))
+		// just migrate cache format
+		return migrateCacheFormatJSON(cacheFormatPath)
+	}
+
+	buckets, err := readDir(oldCacheBucketsPath)
+	if err != nil {
+		return err
+	}
+
+	for _, bucket := range buckets {
+		bucket = strings.TrimSuffix(bucket, SlashSeparator)
+		var objMetaPaths []string
+		root := path.Join(oldCacheBucketsPath, bucket)
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if strings.HasSuffix(path, cacheMetaJSONFile) {
+				objMetaPaths = append(objMetaPaths, path)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		for _, oMeta := range objMetaPaths {
+			objSlice := strings.SplitN(oMeta, cacheMetaJSONFile, 2)
+			object := strings.TrimPrefix(objSlice[0], path.Join(oldCacheBucketsPath, bucket))
+			object = strings.TrimSuffix(object, "/")
+
+			destdir := getCacheSHADir(c.dir, bucket, object)
+			if err := os.MkdirAll(destdir, 0777); err != nil {
+				return err
+			}
+			prevCachedPath := path.Join(c.dir, bucket, object)
+
+			// get old cached metadata
+			oldMetaPath := pathJoin(oldCacheBucketsPath, bucket, object, cacheMetaJSONFile)
+			metaPath := pathJoin(destdir, cacheMetaJSONFile)
+			metaBytes, err := ioutil.ReadFile(oldMetaPath)
+			if err != nil {
+				return err
+			}
+			// marshal cache metadata after adding version and stat info
+			meta := &cacheMeta{}
+			var json = jsoniter.ConfigCompatibleWithStandardLibrary
+			if err = json.Unmarshal(metaBytes, &meta); err != nil {
+				return err
+			}
+			// move cached object to new cache directory path
+			// migrate cache data and add bit-rot protection hash sum
+			// at the start of each block
+			if err := migrateCacheData(ctx, c, bucket, object, prevCachedPath, destdir, meta.Meta); err != nil {
+				continue
+			}
+			stat, err := os.Stat(prevCachedPath)
+			if err != nil {
+				if err == errFileNotFound {
+					continue
+				}
+				logger.LogIf(ctx, err)
+				return err
+			}
+			// old cached file can now be removed
+			if err := os.Remove(prevCachedPath); err != nil {
+				return err
+			}
+			// move cached metadata after changing cache metadata version
+			meta.Checksum = CacheChecksumInfoV1{Algorithm: HighwayHash256S.String(), Blocksize: cacheBlkSize}
+			meta.Version = cacheMetaVersion
+			meta.Stat.Size = stat.Size()
+			meta.Stat.ModTime = stat.ModTime()
+			jsonData, err := json.Marshal(meta)
+			if err != nil {
+				return err
+			}
+
+			if err = ioutil.WriteFile(metaPath, jsonData, 0644); err != nil {
+				return err
+			}
+		}
+
+		// delete old bucket from cache, now that all contents are cleared
+		removeAll(path.Join(c.dir, bucket))
+	}
+
+	// remove .minio.sys sub directories
+	removeAll(path.Join(c.dir, minioMetaBucket, "multipart"))
+	removeAll(path.Join(c.dir, minioMetaBucket, "tmp"))
+	removeAll(path.Join(c.dir, minioMetaBucket, "trash"))
+	removeAll(path.Join(c.dir, minioMetaBucket, "buckets"))
+
+	return migrateCacheFormatJSON(cacheFormatPath)
+
+}
+
+func migrateCacheFormatJSON(cacheFormatPath string) error {
+	// now migrate format.json
+	f, err := os.OpenFile(cacheFormatPath, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	formatV1 := formatCacheV1{}
+	if err := jsonLoad(f, &formatV1); err != nil {
+		return err
+	}
+
+	formatV2 := &formatCacheV2{}
+	formatV2.formatMetaV1 = formatV1.formatMetaV1
+	formatV2.Version = formatMetaVersion1
+	formatV2.Cache = formatV1.Cache
+	formatV2.Cache.Version = formatCacheVersionV2
+	if err := jsonSave(f, formatV2); err != nil {
+		return err
+	}
+	return nil
 }

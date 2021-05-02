@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2015, 2016, 2017, 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -22,34 +23,48 @@ import (
 	"sort"
 
 	"github.com/minio/cli"
-	"github.com/minio/mc/pkg/console"
+	"github.com/minio/minio/pkg/console"
 	"github.com/minio/minio/pkg/trie"
 	"github.com/minio/minio/pkg/words"
 )
 
-// global flags for minio.
-var globalFlags = []cli.Flag{
+// GlobalFlags - global flags for minio.
+var GlobalFlags = []cli.Flag{
+	// Deprecated flag, so its hidden now - existing deployments will keep working.
 	cli.StringFlag{
-		Name:  "config-dir, C",
-		Value: defaultConfigDir.Get(),
-		Usage: "[DEPRECATED] Path to legacy configuration directory.",
+		Name:   "config-dir, C",
+		Value:  defaultConfigDir.Get(),
+		Usage:  "[DEPRECATED] path to legacy configuration directory",
+		Hidden: true,
 	},
 	cli.StringFlag{
 		Name:  "certs-dir, S",
 		Value: defaultCertsDir.Get(),
-		Usage: "Path to certs directory.",
+		Usage: "path to certs directory",
 	},
 	cli.BoolFlag{
 		Name:  "quiet",
-		Usage: "Disable startup information.",
+		Usage: "disable startup information",
 	},
 	cli.BoolFlag{
 		Name:  "anonymous",
-		Usage: "Hide sensitive information from logging.",
+		Usage: "hide sensitive information from logging",
 	},
 	cli.BoolFlag{
 		Name:  "json",
-		Usage: "Output server logs and startup information in json format.",
+		Usage: "output server logs and startup information in json format",
+	},
+	// Deprecated flag, so its hidden now, existing deployments will keep working.
+	cli.BoolFlag{
+		Name:   "compat",
+		Usage:  "enable strict S3 compatibility by turning off certain performance optimizations",
+		Hidden: true,
+	},
+	// This flag is hidden and to be used only during certain performance testing.
+	cli.BoolFlag{
+		Name:   "no-compat",
+		Usage:  "disable strict S3 compatibility by turning on certain performance optimizations",
+		Hidden: true,
 	},
 }
 
@@ -70,8 +85,8 @@ FLAGS:
   {{range .VisibleFlags}}{{.}}
   {{end}}{{end}}
 VERSION:
-  ` + Version +
-	`{{ "\n"}}`
+  {{.Version}}
+`
 
 func newApp(name string) *cli.App {
 	// Collection of minio commands currently supported are.
@@ -88,21 +103,19 @@ func newApp(name string) *cli.App {
 
 	findClosestCommands := func(command string) []string {
 		var closestCommands []string
-		for _, value := range commandsTree.PrefixMatch(command) {
-			closestCommands = append(closestCommands, value.(string))
-		}
+		closestCommands = append(closestCommands, commandsTree.PrefixMatch(command)...)
 
 		sort.Strings(closestCommands)
 		// Suggest other close commands - allow missed, wrongly added and
 		// even transposed characters
 		for _, value := range commandsTree.Walk(commandsTree.Root()) {
-			if sort.SearchStrings(closestCommands, value.(string)) < len(closestCommands) {
+			if sort.SearchStrings(closestCommands, value) < len(closestCommands) {
 				continue
 			}
 			// 2 is arbitrary and represents the max
 			// allowed number of typed errors
-			if words.DamerauLevenshteinDistance(command, value.(string)) < 2 {
-				closestCommands = append(closestCommands, value.(string))
+			if words.DamerauLevenshteinDistance(command, value) < 2 {
+				closestCommands = append(closestCommands, value)
 			}
 		}
 
@@ -112,23 +125,20 @@ func newApp(name string) *cli.App {
 	// Register all commands.
 	registerCommand(serverCmd)
 	registerCommand(gatewayCmd)
-	registerCommand(updateCmd)
-	registerCommand(versionCmd)
 
 	// Set up app.
 	cli.HelpFlag = cli.BoolFlag{
 		Name:  "help, h",
-		Usage: "Show help.",
+		Usage: "show help",
 	}
 
 	app := cli.NewApp()
 	app.Name = name
-	app.Author = "Minio.io"
-	app.Version = Version
-	app.Usage = "Cloud Storage Server."
-	app.Description = `Minio is an Amazon S3 compatible object storage server. Use it to store photos, videos, VMs, containers, log files, or any blob of data as objects.`
-	app.Flags = globalFlags
-	app.HideVersion = true     // Hide `--version` flag, we already have `minio version`.
+	app.Author = "MinIO, Inc."
+	app.Version = ReleaseTag
+	app.Usage = "High Performance Object Storage"
+	app.Description = `Build high performance data infrastructure for machine learning, analytics and application data workloads with MinIO`
+	app.Flags = GlobalFlags
 	app.HideHelpCommand = true // Hide `help, h` command, we already have `minio --help`.
 	app.Commands = commands
 	app.CustomAppHelpTemplate = minioHelpTemplate

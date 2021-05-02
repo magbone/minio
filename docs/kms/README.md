@@ -1,183 +1,123 @@
-# KMS Quickstart Guide [![Slack](https://slack.minio.io/slack?type=svg)](https://slack.minio.io)
+# KMS Guide [![Slack](https://slack.min.io/slack?type=svg)](https://slack.min.io)
 
-Minio uses a key-management-system (KMS) to support SSE-S3. If a client requests SSE-S3, or auto-encryption
-is enabled, the Minio server encrypts each object with an unique object key which is protected by a master key
-managed by the KMS. Usually all object keys are protected by a single master key.
+MinIO uses a key-management-system (KMS) to support SSE-S3. If a client requests SSE-S3, or auto-encryption is enabled, the MinIO server encrypts each object with an unique object key which is protected by a master key managed by the KMS.
 
-Minio supports two different KMS concepts:
- - External KMS:
-   Minio can be configured to use an external KMS i.e. [Hashicorp Vault](https://www.vaultproject.io/).
-   An external KMS decouples Minio as storage system from key-management. An external KMS can
-   be managed by a dedicated security team and allows you to grant/deny access to (certain) objects
-   by enabling or disabling the corresponding master keys on demand.
+## Quick Start
 
-- Direct KMS master keys:
-   Minio can also be configured to directly use a master key specified by the environment variable `MINIO_SSE_MASTER_KEY`.
-   Direct master keys are useful if the storage backend is not on the same machine as the Minio server, e.g.,
-   if network drives or Minio gateway is used and an external KMS would cause too much management overhead.  
-   
-   Note: KMS master keys are mainly for testing purposes. It's not recommended to use them for production deployments.
-   Further if the Minio server machine is ever compromised, then the master key must also be treated as compromised.
+MinIO supports multiple KMS implementations via our [KES](https://github.com/minio/kes#kes) project. We run a KES instance at `https://play.min.io:7373` for you to experiment and quickly get started. To run MinIO with a KMS just fetch the root identity, set the following environment variables and then start your MinIO server. If you havn't installed MinIO, yet, then follow the MinIO [install instructions](https://docs.min.io/docs/minio-quickstart-guide) first.
 
-**Important:**  
-If multiple Minio servers are configured as [gateways](https://github.com/minio/minio/blob/master/docs/gateway/README.md)
-pointing to the *same* backend - for example the same NAS storage - then the KMS configuration **must** be the same for
-all gateways. Otherwise one gateway may not be able to decrypt objects created by another gateway. It is the operators' 
-responsibility to ensure consistency.
-
-## Get started
-
-### 1. Prerequisites
-Install Minio - [Minio Quickstart Guide](https://docs.minio.io/docs/minio-quickstart-guide).
-
-### 2. Setup a KMS
-
-Either use Hashicorp Vault as external KMS or specify a master key directly depending on your use case.
-
-#### 2.1 Setup Hashicorp Vault
-
-Here is a sample quick start for configuring vault with a transit backend and Approle with correct policy 
-
-Minio requires the following Vault setup:
-- The [transit backend](https://www.vaultproject.io/api/secret/transit/index.html) configured with a named encryption key-ring
-- [AppRole](https://www.vaultproject.io/docs/auth/approle.html) based authentication with read/update policy for transit backend. In particular, read and update policy are required for the [Generate Data Key](https://www.vaultproject.io/api/secret/transit/index.html#generate-data-key) endpoint and [Decrypt Data](https://www.vaultproject.io/api/secret/transit/index.html#decrypt-data) endpoint.
-
-**2.1.1 Start Vault server in dev mode**
-
-In dev mode, Vault server runs in-memory and starts unsealed. Note that running Vault in dev mode is insecure and any data stored in the Vault is lost upon restart.
-
-```
-vault server -dev
-```
-
-**2.1.2 Set up vault transit backend and create an app role**
-
-```
-cat > vaultpolicy.hcl <<EOF
-path "transit/datakey/plaintext/my-minio-key" { 
-  capabilities = [ "read", "update"]
-}
-path "transit/decrypt/my-minio-key" { 
-  capabilities = [ "read", "update"]
-}
-path "transit/encrypt/my-minio-key" { 
-  capabilities = [ "read", "update"]
-}
-
-EOF
-
-export VAULT_ADDR='http://127.0.0.1:8200'
-vault auth enable approle    # enable approle style auth
-vault secrets enable transit  # enable transit secrets engine
-vault write -f  transit/keys/my-minio-key  #define a encryption key-ring for the transit path
-vault policy write minio-policy ./vaultpolicy.hcl  #define a policy for AppRole to access transit path
-vault write auth/approle/role/my-role token_num_uses=0  secret_id_num_uses=0  period=5m # period indicates it is renewable if token is renewed before the period is over
-# define an AppRole
-vault write auth/approle/role/my-role policies=minio-policy # apply policy to role
-vault read auth/approle/role/my-role/role-id  # get Approle ID
-vault write -f auth/approle/role/my-role/secret-id
-
-```
-
-The AppRole ID, AppRole Secret Id, Vault endpoint and Vault key name can now be used to start minio server with Vault as KMS.
-
-**2.1.3 Vault Environment variables**
-
-You'll need the Vault endpoint, AppRole ID, AppRole SecretID and encryption key-ring name defined in step 2.1.2
+#### 1. Fetch the root identity
+As the initial step, fetch the private key and certificate of the root identity:
 
 ```sh
-export MINIO_SSE_VAULT_APPROLE_ID=9b56cc08-8258-45d5-24a3-679876769126
-export MINIO_SSE_VAULT_APPROLE_SECRET=4e30c52f-13e4-a6f5-0763-d50e8cb4321f
-export MINIO_SSE_VAULT_ENDPOINT=https://vault-endpoint-ip:8200
-export MINIO_SSE_VAULT_KEY_NAME=my-minio-key
-export MINIO_SSE_VAULT_AUTH_TYPE=approle
+curl -sSL --tlsv1.2 \
+     -O 'https://raw.githubusercontent.com/minio/kes/master/root.key' \
+     -O 'https://raw.githubusercontent.com/minio/kes/master/root.cert'
+```
+
+#### 2. Set the MinIO-KES configuration
+
+```sh
+export MINIO_KMS_KES_ENDPOINT=https://play.min.io:7373
+export MINIO_KMS_KES_KEY_FILE=root.key
+export MINIO_KMS_KES_CERT_FILE=root.cert
+export MINIO_KMS_KES_KEY_NAME=my-minio-key
+```
+
+#### 3. Start the MinIO Server
+
+```sh
+export MINIO_ROOT_USER=minio
+export MINIO_ROOT_PASSWORD=minio123
 minio server ~/export
 ```
 
-Optionally, set `MINIO_SSE_VAULT_CAPATH` to a directory of PEM-encoded CA cert files to use mTLS for client-server authentication.
+> The KES instance at `https://play.min.io:7373` is meant to experiment and provides a way to get started quickly.
+> Note that anyone can access or delete master keys at `https://play.min.io:7373`. You should run your own KES
+> instance in production.
 
+## Configuration Guides
+
+A typical MinIO deployment that uses a KMS for SSE-S3 looks like this:
 ```
-export MINIO_SSE_VAULT_CAPATH=/home/user/custom-certs
-```
-
-An additional option is to set `MINIO_SSE_VAULT_NAMESPACE` if AppRole and Transit Secrets engine have been scoped to Vault Namespace
-
-```
-export MINIO_SSE_VAULT_NAMESPACE=ns1
-```
-
-Note: If [Vault Namespaces](https://learn.hashicorp.com/vault/operations/namespaces) are in use, MINIO_SSE_VAULT_NAMESPACE variable needs to be set before setting approle and transit secrets engine.
-
-Minio gateway to S3 supports encryption. Three encryption modes are possible - encryption can be set to ``pass-through`` to backend, ``single encryption`` (at the gateway) or ``double encryption`` (single encryption at gateway and pass through to backend). This can be specified by setting MINIO_GATEWAY_SSE and KMS environment variables set in Step 2.1.2.
-
-If MINIO_GATEWAY_SSE and KMS are not setup, all encryption headers are passed through to the backend. If KMS environment variables are set up, ``single encryption`` is automatically performed at the gateway and encrypted object is saved at the backend.
-
-To specify ``double encryption``, MINIO_GATEWAY_SSE environment variable needs to be set to "s3" for sse-s3
-and "c" for sse-c encryption. More than one encryption option can be set, delimited by ";". Objects are encrypted at the gateway and the gateway also does a pass-through to backend. Note that in the case of SSE-C encryption, gateway derives a unique SSE-C key for pass through from the SSE-C client key using a KDF.
-
-```sh
-export MINIO_GATEWAY_SSE="s3;c"
-export MINIO_SSE_VAULT_APPROLE_ID=9b56cc08-8258-45d5-24a3-679876769126
-export MINIO_SSE_VAULT_APPROLE_SECRET=4e30c52f-13e4-a6f5-0763-d50e8cb4321f
-export MINIO_SSE_VAULT_ENDPOINT=https://vault-endpoint-ip:8200
-export MINIO_SSE_VAULT_KEY_NAME=my-minio-key
-export MINIO_SSE_VAULT_AUTH_TYPE=approle
-minio gateway s3
+    ┌────────────┐
+    │ ┌──────────┴─┬─────╮          ┌────────────┐
+    └─┤ ┌──────────┴─┬───┴──────────┤ ┌──────────┴─┬─────────────────╮
+      └─┤ ┌──────────┴─┬─────┬──────┴─┤ KES Server ├─────────────────┤
+        └─┤   MinIO    ├─────╯        └────────────┘            ┌────┴────┐
+          └────────────┘                                        │   KMS   │
+                                                                └─────────┘
 ```
 
-#### 2.2 Specify a master key
+In a given setup, there are `n` MinIO instances talking to `m` KES servers but only `1` central KMS. The most simple setup consists of `1` MinIO server or cluster talking to `1` KMS via `1` KES server.
 
-A KMS master key consists of a master-key ID (CMK) and the 256 bit master key encoded as HEX value separated by a `:`.
-A KMS master key can be specified directly using:
+The main difference between various MinIO-KMS deployments is the KMS implementation. The following table helps you select the right option for your use case:
 
-```sh
-export MINIO_SSE_MASTER_KEY=my-minio-key:6368616e676520746869732070617373776f726420746f206120736563726574
+| KMS                                                                                          | Purpose                                                           |
+|:---------------------------------------------------------------------------------------------|:------------------------------------------------------------------|
+| [Hashicorp Vault](https://github.com/minio/kes/wiki/Hashicorp-Vault-Keystore)                | Local KMS. MinIO and KMS on-prem (**Recommended**)                |
+| [AWS-KMS + SecretsManager](https://github.com/minio/kes/wiki/AWS-SecretsManager)             | Cloud KMS. MinIO in combination with a managed KMS installation   |
+| [Gemalto KeySecure /Thales CipherTrust](https://github.com/minio/kes/wiki/Gemalto-KeySecure) | Local KMS. MinIO and KMS On-Premises.                             |
+| [Google Cloud Platform SecretManager](https://github.com/minio/kes/wiki/GCP-SecretManager)   | Cloud KMS. MinIO in combination with a managed KMS installation   |
+| [FS](https://github.com/minio/kes/wiki/Filesystem-Keystore)                                  | Local testing or development (**Not recommended for production**) |
+
+
+The MinIO-KES configuration is always the same - regardless of the underlying KMS implementation. Checkout the MinIO-KES [configuration example](https://github.com/minio/kes/wiki/MinIO-Object-Storage).
+
+### Further references
+
+- [Run MinIO with TLS / HTTPS](https://docs.min.io/docs/how-to-secure-access-to-minio-server-with-tls.html)
+- [Tweak the KES server configuration](https://github.com/minio/kes/wiki/Configuration)
+- [Run a load balancer infront of KES](https://github.com/minio/kes/wiki/TLS-Proxy)
+- [Understand the KES server concepts](https://github.com/minio/kes/wiki/Concepts)
+
+## Auto Encryption
+Auto-Encryption is useful when MinIO administrator wants to ensure that all data stored on MinIO is encrypted at rest.
+
+### Using `mc encrypt` (recommended)
+MinIO automatically encrypts all objects on buckets if KMS is successfully configured and bucket encryption configuration is enabled for each bucket as shown below:
+```
+mc encrypt set sse-s3 myminio/bucket/
 ```
 
-Please use your own master key. A random master key can be generated using e.g. this command on Linux/Mac/BSD* systems:
-
-```sh
-head -c 32 /dev/urandom | xxd -c 32 -ps
+Verify if MinIO has `sse-s3` enabled
+```
+mc encrypt info myminio/bucket/
+Auto encryption 'sse-s3' is enabled
 ```
 
-### 3. Test your setup
-To test this setup, start minio server with environment variables set in Step 3, and server is ready to handle SSE-S3 requests.
+### Using environment (deprecated)
+> NOTE: The following ENV might be removed in future, you are advised to move to the previously recommended approach using `mc encrypt`. S3 gateway supports encryption at gateway layer which may  be dropped in favor of simplicity at a later time. It is advised that S3 gateway users migrate to MinIO server mode or enable encryption at REST at the backend.
 
-### Auto-Encryption
-
-Minio can also enable auto-encryption **if** a valid KMS configuration is specified and the storage backend supports
-encrypted objects. Auto-Encryption, if enabled, ensures that all uploaded objects are encrypted using the specified
-KMS configuration.
-
-Auto-Encryption is useful especially if the Minio operator wants to ensure that objects are **never** stored in 
-plaintext - for example if sensitive data is stored on public cloud storage.
-
-To enable auto-encryption set the environment variable to `on`:
-
-```sh
-export MINIO_SSE_AUTO_ENCRYPTION=on
+MinIO automatically encrypts all objects on buckets if KMS is successfully configured and following ENV is enabled:
+```
+export MINIO_KMS_AUTO_ENCRYPTION=on
 ```
 
-To verify auto-encryption, use the `mc` command:
+### Verify auto-encryption
+> Note that auto-encryption only affects requests without S3 encryption headers. So, if a S3 client sends
+> e.g. SSE-C headers, MinIO will encrypt the object with the key sent by the client and won't reach out to
+> the configured KMS.
 
-```sh
-mc cp test.file myminio/crypt/
+To verify auto-encryption, use the following `mc` command:
+
+```
+mc cp test.file myminio/bucket/
 test.file:              5 B / 5 B  ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  100.00% 337 B/s 0s
-mc stat myminio/crypt/test.file
+```
+
+```
+mc stat myminio/bucket/test.file
 Name      : test.file
 ...
 Encrypted :
   X-Amz-Server-Side-Encryption: AES256
 ```
 
-Note: Auto-Encryption only affects non-SSE-C requests since objects uploaded using SSE-C are already encrypted
-and S3 only allows either SSE-S3 or SSE-C but not both for the same object.   
+## Explore Further
 
-
-# Explore Further
-
-- [Use `mc` with Minio Server](https://docs.minio.io/docs/minio-client-quickstart-guide)
-- [Use `aws-cli` with Minio Server](https://docs.minio.io/docs/aws-cli-with-minio)
-- [Use `s3cmd` with Minio Server](https://docs.minio.io/docs/s3cmd-with-minio)
-- [Use `minio-go` SDK with Minio Server](https://docs.minio.io/docs/golang-client-quickstart-guide)
-- [The Minio documentation website](https://docs.minio.io)
+- [Use `mc` with MinIO Server](https://docs.min.io/docs/minio-client-quickstart-guide)
+- [Use `aws-cli` with MinIO Server](https://docs.min.io/docs/aws-cli-with-minio)
+- [Use `s3cmd` with MinIO Server](https://docs.min.io/docs/s3cmd-with-minio)
+- [Use `minio-go` SDK with MinIO Server](https://docs.min.io/docs/golang-client-quickstart-guide)
+- [The MinIO documentation website](https://docs.min.io)

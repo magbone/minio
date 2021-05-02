@@ -1,39 +1,40 @@
-FROM golang:1.11.4-alpine3.7
+FROM golang:1.16-alpine as builder
 
-LABEL maintainer="Minio Inc <dev@minio.io>"
+LABEL maintainer="MinIO Inc <dev@min.io>"
 
 ENV GOPATH /go
 ENV CGO_ENABLED 0
-
-WORKDIR /go/src/github.com/minio/
+ENV GO111MODULE on
 
 RUN  \
      apk add --no-cache git && \
-     go get -v -d github.com/minio/minio && \
-     cd /go/src/github.com/minio/minio && \
-     go install -v -ldflags "$(go run buildscripts/gen-ldflags.go)" && \
-     go build -ldflags "-s -w" -o /usr/bin/healthcheck dockerscripts/healthcheck.go 
+     git clone https://github.com/minio/minio && cd minio && \
+     git checkout master && go install -v -ldflags "$(go run buildscripts/gen-ldflags.go)"
 
-FROM alpine:3.7
+FROM registry.access.redhat.com/ubi8/ubi-minimal:8.3
 
-ENV MINIO_UPDATE off
 ENV MINIO_ACCESS_KEY_FILE=access_key \
-    MINIO_SECRET_KEY_FILE=secret_key
+    MINIO_SECRET_KEY_FILE=secret_key \
+    MINIO_ROOT_USER_FILE=access_key \
+    MINIO_ROOT_PASSWORD_FILE=secret_key \
+    MINIO_KMS_SECRET_KEY_FILE=kms_master_key \
+    MINIO_UPDATE_MINISIGN_PUBKEY="RWTx5Zr1tiHQLwG9keckT0c45M3AGeHD6IvimQHpyRywVWGbP1aVSGav"
 
 EXPOSE 9000
 
-COPY --from=0 /go/bin/minio /usr/bin/minio
-COPY --from=0 /usr/bin/healthcheck /usr/bin/healthcheck
-COPY dockerscripts/docker-entrypoint.sh /usr/bin/
+COPY --from=builder /go/bin/minio /usr/bin/minio
+COPY --from=builder /go/minio/CREDITS /licenses/CREDITS
+COPY --from=builder /go/minio/LICENSE /licenses/LICENSE
+COPY --from=builder /go/minio/dockerscripts/docker-entrypoint.sh /usr/bin/
 
 RUN  \
-     apk add --no-cache ca-certificates 'curl>7.61.0' && \
+     microdnf update --nodocs && \
+     microdnf install curl ca-certificates shadow-utils util-linux --nodocs && \
+     microdnf clean all && \
      echo 'hosts: files mdns4_minimal [NOTFOUND=return] dns mdns4' >> /etc/nsswitch.conf
 
 ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
 
 VOLUME ["/data"]
-
-HEALTHCHECK --interval=1m CMD healthcheck
 
 CMD ["minio"]

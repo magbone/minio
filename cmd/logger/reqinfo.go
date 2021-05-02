@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package logger
 
@@ -30,18 +31,20 @@ const contextLogKey = contextKeyType("miniolog")
 // KeyVal - appended to ReqInfo.Tags
 type KeyVal struct {
 	Key string
-	Val string
+	Val interface{}
 }
 
 // ReqInfo stores the request info.
 type ReqInfo struct {
 	RemoteHost   string   // Client Host/IP
+	Host         string   // Node Host/IP
 	UserAgent    string   // User Agent
 	DeploymentID string   // x-minio-deployment-id
 	RequestID    string   // x-amz-request-id
 	API          string   // API name - GetObject PutObject NewMultipartUpload etc.
 	BucketName   string   // Bucket name
 	ObjectName   string   // Object name
+	AccessKey    string   // Access Key
 	tags         []KeyVal // Any additional info not accommodated by above fields
 	sync.RWMutex
 }
@@ -60,7 +63,7 @@ func NewReqInfo(remoteHost, userAgent, deploymentID, requestID, api, bucket, obj
 }
 
 // AppendTags - appends key/val to ReqInfo.tags
-func (r *ReqInfo) AppendTags(key string, val string) *ReqInfo {
+func (r *ReqInfo) AppendTags(key string, val interface{}) *ReqInfo {
 	if r == nil {
 		return nil
 	}
@@ -71,7 +74,7 @@ func (r *ReqInfo) AppendTags(key string, val string) *ReqInfo {
 }
 
 // SetTags - sets key/val to ReqInfo.tags
-func (r *ReqInfo) SetTags(key string, val string) *ReqInfo {
+func (r *ReqInfo) SetTags(key string, val interface{}) *ReqInfo {
 	if r == nil {
 		return nil
 	}
@@ -101,6 +104,20 @@ func (r *ReqInfo) GetTags() []KeyVal {
 	r.RLock()
 	defer r.RUnlock()
 	return append([]KeyVal(nil), r.tags...)
+}
+
+// GetTagsMap - returns the user defined tags in a map structure
+func (r *ReqInfo) GetTagsMap() map[string]interface{} {
+	if r == nil {
+		return nil
+	}
+	r.RLock()
+	defer r.RUnlock()
+	m := make(map[string]interface{}, len(r.tags))
+	for _, t := range r.tags {
+		m[t.Key] = t.Val
+	}
+	return m
 }
 
 // SetReqInfo sets ReqInfo in the context.

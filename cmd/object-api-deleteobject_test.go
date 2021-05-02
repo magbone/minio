@@ -1,30 +1,31 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"strings"
 	"testing"
 )
 
-// Wrapper for calling DeleteObject tests for both XL multiple disks and single node setup.
+// Wrapper for calling DeleteObject tests for both Erasure multiple disks and single node setup.
 func TestDeleteObject(t *testing.T) {
 	ExecObjectLayerTest(t, testDeleteObject)
 }
@@ -74,7 +75,7 @@ func testDeleteObject(obj ObjectLayer, instanceType string, t TestErrHandler) {
 			"dir/",
 			[]string{"dir/object1", "object0"},
 		},
-		// Test 4: Remove an empty directory and checks it is really removed
+		// Test 5: Remove an empty directory and checks it is really removed
 		{
 			"bucket5",
 			[]objectUpload{{"object0", "content"}, {"dir/", ""}},
@@ -84,31 +85,33 @@ func testDeleteObject(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	}
 
 	for i, testCase := range testCases {
-
-		err := obj.MakeBucketWithLocation(context.Background(), testCase.bucketName, "")
+		err := obj.MakeBucketWithLocation(context.Background(), testCase.bucketName, BucketOptions{})
 		if err != nil {
 			t.Fatalf("%s : %s", instanceType, err.Error())
 		}
 
 		for _, object := range testCase.objectToUploads {
 			md5Bytes := md5.Sum([]byte(object.content))
-			_, err = obj.PutObject(context.Background(), testCase.bucketName, object.name, mustGetPutObjReader(t, bytes.NewBufferString(object.content),
+			oi, err := obj.PutObject(context.Background(), testCase.bucketName, object.name, mustGetPutObjReader(t, strings.NewReader(object.content),
 				int64(len(object.content)), hex.EncodeToString(md5Bytes[:]), ""), ObjectOptions{})
+			t.Log(oi)
 			if err != nil {
 				t.Fatalf("%s : %s", instanceType, err.Error())
 			}
 		}
 
-		// TODO: check the error in the future
-		_ = obj.DeleteObject(context.Background(), testCase.bucketName, testCase.pathToDelete)
+		oi, err := obj.DeleteObject(context.Background(), testCase.bucketName, testCase.pathToDelete, ObjectOptions{})
+		t.Log(oi, err)
 
 		result, err := obj.ListObjects(context.Background(), testCase.bucketName, "", "", "", 1000)
 		if err != nil {
 			t.Errorf("Test %d: %s:  Expected to pass, but failed with: <ERROR> %s", i+1, instanceType, err.Error())
+			continue
 		}
 
 		if len(result.Objects) != len(testCase.objectsAfterDelete) {
-			t.Errorf("Test %d: %s: mismatch number of objects after delete, expected = %d, found = %d", i+1, instanceType, len(testCase.objectsAfterDelete), len(result.Objects))
+			t.Errorf("Test %d: %s: mismatch number of objects after delete, expected = %v, found = %v", i+1, instanceType, testCase.objectsAfterDelete, result.Objects)
+			continue
 		}
 
 		for idx := range result.Objects {

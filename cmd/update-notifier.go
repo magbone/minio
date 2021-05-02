@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2015, 2016, 2017 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
@@ -25,6 +26,7 @@ import (
 
 	"github.com/cheggaaa/pb"
 	humanize "github.com/dustin/go-humanize"
+	"github.com/minio/minio/pkg/color"
 )
 
 // prepareUpdateMessage - prepares the update message, only if a
@@ -45,7 +47,7 @@ func prepareUpdateMessage(downloadURL string, older time.Duration) string {
 
 // colorizeUpdateMessage - inspired from Yeoman project npm package https://github.com/yeoman/update-notifier
 func colorizeUpdateMessage(updateString string, newerThan string) string {
-	msgLine1Fmt := " You are running an older version of Minio released %s "
+	msgLine1Fmt := " You are running an older version of MinIO released %s "
 	msgLine2Fmt := " Update: %s "
 
 	// Calculate length *without* color coding: with ANSI terminal
@@ -54,8 +56,8 @@ func colorizeUpdateMessage(updateString string, newerThan string) string {
 	line2Length := len(fmt.Sprintf(msgLine2Fmt, updateString))
 
 	// Populate lines with color coding.
-	line1InColor := fmt.Sprintf(msgLine1Fmt, colorYellowBold(newerThan))
-	line2InColor := fmt.Sprintf(msgLine2Fmt, colorCyanBold(updateString))
+	line1InColor := fmt.Sprintf(msgLine1Fmt, color.YellowBold(newerThan))
+	line2InColor := fmt.Sprintf(msgLine2Fmt, color.CyanBold(updateString))
 
 	// calculate the rectangular box size.
 	maxContentWidth := int(math.Max(float64(line1Length), float64(line2Length)))
@@ -89,10 +91,10 @@ func colorizeUpdateMessage(updateString string, newerThan string) string {
 	}
 
 	lines := []string{
-		colorYellowBold(topLeftChar + strings.Repeat(horizBarChar, maxContentWidth) + topRightChar),
+		color.YellowBold(topLeftChar + strings.Repeat(horizBarChar, maxContentWidth) + topRightChar),
 		vertBarChar + line1InColor + strings.Repeat(" ", maxContentWidth-line1Length) + vertBarChar,
 		vertBarChar + line2InColor + strings.Repeat(" ", maxContentWidth-line2Length) + vertBarChar,
-		colorYellowBold(bottomLeftChar + strings.Repeat(horizBarChar, maxContentWidth) + bottomRightChar),
+		color.YellowBold(bottomLeftChar + strings.Repeat(horizBarChar, maxContentWidth) + bottomRightChar),
 	}
 	return "\n" + strings.Join(lines, "\n") + "\n"
 }

@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2016 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,9 +14,6 @@
  * limitations under the License.
  */
 
-// File for all the browser constants.
-
-// minioBrowserPrefix absolute path.
 var p = window.location.pathname
 export const minioBrowserPrefix = p.slice(0, p.indexOf("/", 1))
 
@@ -28,3 +25,13 @@ export const NONE = "none"
 export const SHARE_OBJECT_EXPIRY_DAYS = 5
 export const SHARE_OBJECT_EXPIRY_HOURS = 0
 export const SHARE_OBJECT_EXPIRY_MINUTES = 0
+
+export const ACCESS_KEY_MIN_LENGTH = 3
+export const SECRET_KEY_MIN_LENGTH = 8
+
+export const SORT_BY_NAME = "name"
+export const SORT_BY_SIZE = "size"
+export const SORT_BY_LAST_MODIFIED = "last-modified"
+
+export const SORT_ORDER_ASC = "asc"
+export const SORT_ORDER_DESC = "desc"

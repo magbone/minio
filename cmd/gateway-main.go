@@ -1,24 +1,26 @@
-/*
- * Minio Cloud Storage, (C) 2017, 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package cmd
 
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"os/signal"
@@ -30,25 +32,80 @@ import (
 	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/certs"
+	"github.com/minio/minio/pkg/color"
+	"github.com/minio/minio/pkg/env"
 )
-
-func init() {
-	logger.Init(GOPATH, GOROOT)
-	logger.RegisterUIError(fmtError)
-}
 
 var (
 	gatewayCmd = cli.Command{
 		Name:            "gateway",
 		Usage:           "start object storage gateway",
-		Flags:           append(serverFlags, globalFlags...),
+		Flags:           append(ServerFlags, GlobalFlags...),
 		HideHelpCommand: true,
 	}
 )
 
+// GatewayLocker implements custom NewNSLock implementation
+type GatewayLocker struct {
+	ObjectLayer
+	nsMutex *nsLockMap
+}
+
+// NewNSLock - implements gateway level locker
+func (l *GatewayLocker) NewNSLock(bucket string, objects ...string) RWLocker {
+	return l.nsMutex.NewNSLock(nil, bucket, objects...)
+}
+
+// Walk - implements common gateway level Walker, to walk on all objects recursively at a prefix
+func (l *GatewayLocker) Walk(ctx context.Context, bucket, prefix string, results chan<- ObjectInfo, opts ObjectOptions) error {
+	walk := func(ctx context.Context, bucket, prefix string, results chan<- ObjectInfo) error {
+		go func() {
+			// Make sure the results channel is ready to be read when we're done.
+			defer close(results)
+
+			var marker string
+
+			for {
+				// set maxKeys to '0' to list maximum possible objects in single call.
+				loi, err := l.ObjectLayer.ListObjects(ctx, bucket, prefix, marker, "", 0)
+				if err != nil {
+					logger.LogIf(ctx, err)
+					return
+				}
+				marker = loi.NextMarker
+				for _, obj := range loi.Objects {
+					select {
+					case results <- obj:
+					case <-ctx.Done():
+						return
+					}
+				}
+				if !loi.IsTruncated {
+					break
+				}
+			}
+		}()
+		return nil
+	}
+
+	if err := l.ObjectLayer.Walk(ctx, bucket, prefix, results, opts); err != nil {
+		if _, ok := err.(NotImplemented); ok {
+			return walk(ctx, bucket, prefix, results)
+		}
+		return err
+	}
+
+	return nil
+}
+
+// NewGatewayLayerWithLocker - initialize gateway with locker.
+func NewGatewayLayerWithLocker(gwLayer ObjectLayer) ObjectLayer {
+	return &GatewayLocker{ObjectLayer: gwLayer, nsMutex: newNSLock(false)}
+}
+
 // RegisterGatewayCommand registers a new command for gateway.
 func RegisterGatewayCommand(cmd cli.Command) error {
-	cmd.Flags = append(append(cmd.Flags, append(cmd.Flags, serverFlags...)...), globalFlags...)
+	cmd.Flags = append(append(cmd.Flags, ServerFlags...), GlobalFlags...)
 	gatewayCmd.Subcommands = append(gatewayCmd.Subcommands, cmd)
 	return nil
 }
@@ -97,22 +154,49 @@ func ValidateGatewayArguments(serverAddr, endpointAddr string) error {
 
 // StartGateway - handler for 'minio gateway <name>'.
 func StartGateway(ctx *cli.Context, gw Gateway) {
+	defer globalDNSCache.Stop()
+
+	// This is only to uniquely identify each gateway deployments.
+	globalDeploymentID = env.Get("MINIO_GATEWAY_DEPLOYMENT_ID", mustGetUUID())
+	logger.SetDeploymentID(globalDeploymentID)
+
 	if gw == nil {
 		logger.FatalIf(errUnexpected, "Gateway implementation not initialized")
 	}
 
-	// Disable logging until gateway initialization is complete, any
-	// error during initialization will be shown as a fatal message
-	logger.Disable = true
-
 	// Validate if we have access, secret set through environment.
+	globalGatewayName = gw.Name()
 	gatewayName := gw.Name()
 	if ctx.Args().First() == "help" {
 		cli.ShowCommandHelpAndExit(ctx, gatewayName, 1)
 	}
 
+	// Initialize globalConsoleSys system
+	globalConsoleSys = NewConsoleLogger(GlobalContext)
+	logger.AddTarget(globalConsoleSys)
+
 	// Handle common command args.
 	handleCommonCmdArgs(ctx)
+
+	// Check and load TLS certificates.
+	var err error
+	globalPublicCerts, globalTLSCerts, globalIsTLS, err = getTLSConfig()
+	logger.FatalIf(err, "Invalid TLS certificate file")
+
+	// Check and load Root CAs.
+	globalRootCAs, err = certs.GetRootCAs(globalCertsCADir.Get())
+	logger.FatalIf(err, "Failed to read root CAs (%v)", err)
+
+	// Add the global public crts as part of global root CAs
+	for _, publicCrt := range globalPublicCerts {
+		globalRootCAs.AddCert(publicCrt)
+	}
+
+	// Register root CAs for remote ENVs
+	env.RegisterGlobalCAs(globalRootCAs)
+
+	// Initialize all help
+	initHelp()
 
 	// Get port to listen on from gateway address
 	globalMinioHost, globalMinioPort = mustSplitHostPort(globalCLIContext.Addr)
@@ -121,41 +205,52 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 	// to IPv6 address ie minio will start listening on IPv6 address whereas another
 	// (non-)minio process is listening on IPv4 of given port.
 	// To avoid this error situation we check for port availability.
-	logger.FatalIf(checkPortAvailability(globalMinioPort), "Unable to start the gateway")
+	logger.FatalIf(checkPortAvailability(globalMinioHost, globalMinioPort), "Unable to start the gateway")
 
-	// Check and load TLS certificates.
-	var err error
-	globalPublicCerts, globalTLSCerts, globalIsSSL, err = getTLSConfig()
-	logger.FatalIf(err, "Invalid TLS certificate file")
-
-	// Check and load Root CAs.
-	globalRootCAs, err = getRootCAs(globalCertsCADir.Get())
-	logger.FatalIf(err, "Failed to read root CAs (%v)", err)
-
-	// Handle common env vars.
-	handleCommonEnvVars()
+	globalMinioEndpoint = func() string {
+		host := globalMinioHost
+		if host == "" {
+			host = sortIPs(localIP4.ToSlice())[0]
+		}
+		return fmt.Sprintf("%s://%s", getURLScheme(globalIsTLS), net.JoinHostPort(host, globalMinioPort))
+	}()
 
 	// Handle gateway specific env
-	handleGatewayEnvVars()
-
-	// Validate if we have access, secret set through environment.
-	if !globalIsEnvCreds {
-		logger.Fatal(uiErrEnvCredentialsMissingGateway(nil), "Unable to start gateway")
-	}
+	gatewayHandleEnvVars()
 
 	// Set system resources to maximum.
-	logger.LogIf(context.Background(), setMaxResources())
+	setMaxResources()
 
-	initNSLock(false) // Enable local namespace lock.
+	// Set when gateway is enabled
+	globalIsGateway = true
 
-	router := mux.NewRouter().SkipClean(true)
+	enableConfigOps := false
+
+	// TODO: We need to move this code with globalConfigSys.Init()
+	// for now keep it here such that "s3" gateway layer initializes
+	// itself properly when KMS is set.
+
+	// Initialize server config.
+	srvCfg := newServerConfig()
+
+	// Override any values from ENVs.
+	lookupConfigs(srvCfg, nil)
+
+	// hold the mutex lock before a new config is assigned.
+	globalServerConfigMu.Lock()
+	globalServerConfig = srvCfg
+	globalServerConfigMu.Unlock()
+
+	// Initialize router. `SkipClean(true)` stops gorilla/mux from
+	// normalizing URL path minio/minio#3256
+	// avoid URL path encoding minio/minio#8950
+	router := mux.NewRouter().SkipClean(true).UseEncodedPath()
 
 	if globalEtcdClient != nil {
 		// Enable STS router if etcd is enabled.
 		registerSTSRouter(router)
 	}
 
-	enableConfigOps := globalEtcdClient != nil && gatewayName == "nas"
 	enableIAMOps := globalEtcdClient != nil
 
 	// Enable IAM admin APIs if etcd is enabled, if not just enable basic
@@ -169,120 +264,98 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 	registerMetricsRouter(router)
 
 	// Register web router when its enabled.
-	if globalIsBrowserEnabled {
+	if globalBrowserEnabled {
 		logger.FatalIf(registerWebRouter(router), "Unable to configure web browser")
 	}
 
-	// Currently only NAS and S3 gateway support encryption headers.
-	encryptionEnabled := gatewayName == "s3" || gatewayName == "nas"
-
 	// Add API router.
-	registerAPIRouter(router, encryptionEnabled)
+	registerAPIRouter(router)
+
+	// Use all the middlewares
+	router.Use(globalHandlers...)
 
 	var getCert certs.GetCertificateFunc
 	if globalTLSCerts != nil {
 		getCert = globalTLSCerts.GetCertificate
 	}
 
-	globalHTTPServer = xhttp.NewServer([]string{globalCLIContext.Addr}, criticalErrorHandler{registerHandlers(router, globalHandlers...)}, getCert)
-	globalHTTPServer.UpdateBytesReadFunc = globalConnStats.incInputBytes
-	globalHTTPServer.UpdateBytesWrittenFunc = globalConnStats.incOutputBytes
+	httpServer := xhttp.NewServer([]string{globalCLIContext.Addr},
+		criticalErrorHandler{corsHandler(router)}, getCert)
+	httpServer.BaseContext = func(listener net.Listener) context.Context {
+		return GlobalContext
+	}
 	go func() {
-		globalHTTPServerErrorCh <- globalHTTPServer.Start()
+		globalHTTPServerErrorCh <- httpServer.Start()
 	}()
 
-	signal.Notify(globalOSSignalCh, os.Interrupt, syscall.SIGTERM)
+	globalObjLayerMutex.Lock()
+	globalHTTPServer = httpServer
+	globalObjLayerMutex.Unlock()
 
-	// !!! Do not move this block !!!
-	// For all gateways, the config needs to be loaded from env
-	// prior to initializing the gateway layer
-	{
-		// Initialize server config.
-		srvCfg := newServerConfig()
+	signal.Notify(globalOSSignalCh, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
 
-		// Override any values from ENVs.
-		srvCfg.loadFromEnvs()
-
-		// Load values to cached global values.
-		srvCfg.loadToCachedConfigs()
-
-		// hold the mutex lock before a new config is assigned.
-		globalServerConfigMu.Lock()
-		globalServerConfig = srvCfg
-		globalServerConfigMu.Unlock()
-	}
-
-	newObject, err := gw.NewGatewayLayer(globalServerConfig.GetCredential())
+	newObject, err := gw.NewGatewayLayer(globalActiveCred)
 	if err != nil {
-		// Stop watching for any certificate changes.
-		globalTLSCerts.Stop()
-
 		globalHTTPServer.Shutdown()
 		logger.FatalIf(err, "Unable to initialize gateway backend")
 	}
+	newObject = NewGatewayLayerWithLocker(newObject)
 
-	if enableConfigOps {
-		// Create a new config system.
-		globalConfigSys = NewConfigSys()
+	// Calls all New() for all sub-systems.
+	newAllSubsystems()
 
-		// Load globalServerConfig from etcd
-		logger.LogIf(context.Background(), globalConfigSys.Init(newObject))
-	}
-
-	// Load logger subsystem
-	loadLoggers()
-
-	// This is only to uniquely identify each gateway deployments.
-	globalDeploymentID = os.Getenv("MINIO_GATEWAY_DEPLOYMENT_ID")
-
-	var cacheConfig = globalServerConfig.GetCacheConfig()
-	if len(cacheConfig.Drives) > 0 {
-		var err error
-		// initialize the new disk cache objects.
-		globalCacheObjectAPI, err = newServerCacheObjects(cacheConfig)
-		logger.FatalIf(err, "Unable to initialize disk caching")
-	}
-
-	// Re-enable logging
-	logger.Disable = false
-
-	// Create new IAM system.
-	globalIAMSys = NewIAMSys()
-	if enableIAMOps {
-		// Initialize IAM sys.
-		logger.LogIf(context.Background(), globalIAMSys.Init(newObject))
-	}
-
-	// Create new policy system.
-	globalPolicySys = NewPolicySys()
-
-	// Initialize policy system.
-	go globalPolicySys.Init(newObject)
-
-	// Create new notification system.
-	globalNotificationSys = NewNotificationSys(globalServerConfig, globalEndpoints)
-	if globalEtcdClient != nil && newObject.IsNotificationSupported() {
-		logger.LogIf(context.Background(), globalNotificationSys.Init(newObject))
-	}
-
-	// Encryption support checks in gateway mode.
-	{
-
-		if (globalAutoEncryption || GlobalKMS != nil) && !newObject.IsEncryptionSupported() {
-			logger.Fatal(errInvalidArgument,
-				"Encryption support is requested but (%s) gateway does not support encryption", gw.Name())
-		}
-
-		if GlobalGatewaySSE.IsSet() && GlobalKMS == nil {
-			logger.Fatal(uiErrInvalidGWSSEEnvValue(nil).Msg("MINIO_GATEWAY_SSE set but KMS is not configured"),
-				"Unable to start gateway with SSE")
-		}
-	}
-
-	// Once endpoints are finalized, initialize the new object api.
+	// Once endpoints are finalized, initialize the new object api in safe mode.
 	globalObjLayerMutex.Lock()
 	globalObjectAPI = newObject
 	globalObjLayerMutex.Unlock()
+
+	if gatewayName == NASBackendGateway {
+		buckets, err := newObject.ListBuckets(GlobalContext)
+		if err != nil {
+			logger.Fatal(err, "Unable to list buckets")
+		}
+		logger.FatalIf(globalNotificationSys.Init(GlobalContext, buckets, newObject), "Unable to initialize notification system")
+	}
+
+	if globalEtcdClient != nil {
+		// ****  WARNING ****
+		// Migrating to encrypted backend on etcd should happen before initialization of
+		// IAM sub-systems, make sure that we do not move the above codeblock elsewhere.
+		logger.FatalIf(migrateIAMConfigsEtcdToEncrypted(GlobalContext, globalEtcdClient),
+			"Unable to handle encrypted backend for iam and policies")
+	}
+
+	if enableIAMOps {
+		// Initialize users credentials and policies in background.
+		globalIAMSys.InitStore(newObject)
+
+		go globalIAMSys.Init(GlobalContext, newObject)
+	}
+
+	if globalCacheConfig.Enabled {
+		// initialize the new disk cache objects.
+		var cacheAPI CacheObjectLayer
+		cacheAPI, err = newServerCacheObjects(GlobalContext, globalCacheConfig)
+		logger.FatalIf(err, "Unable to initialize disk caching")
+
+		globalObjLayerMutex.Lock()
+		globalCacheObjectAPI = cacheAPI
+		globalObjLayerMutex.Unlock()
+	}
+
+	// Populate existing buckets to the etcd backend
+	if globalDNSConfig != nil {
+		buckets, err := newObject.ListBuckets(GlobalContext)
+		if err != nil {
+			logger.Fatal(err, "Unable to list buckets")
+		}
+		initFederatorBackend(buckets, newObject)
+	}
+
+	// Verify if object layer supports
+	// - encryption
+	// - compression
+	verifyObjectLayerFeatures("gateway "+gatewayName, newObject)
 
 	// Prints the formatted startup message once object layer is initialized.
 	if !globalCLIContext.Quiet {
@@ -292,15 +365,12 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 
 		// Print a warning message if gateway is not ready for production before the startup banner.
 		if !gw.Production() {
-			logger.StartupMessage(colorYellow("               *** Warning: Not Ready for Production ***"))
+			logStartupMessage(color.Yellow("               *** Warning: Not Ready for Production ***"))
 		}
 
 		// Print gateway startup message.
 		printGatewayStartupMessage(getAPIEndpoints(), gatewayName)
 	}
-
-	// Set uptime time after object layer has initialized.
-	globalBootTime = UTCNow()
 
 	handleSignals()
 }

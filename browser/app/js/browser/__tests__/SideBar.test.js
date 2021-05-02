@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,7 +35,20 @@ describe("SideBar", () => {
   it("should call clickOutside when the user clicks outside the sidebar", () => {
     const clickOutside = jest.fn()
     const wrapper = shallow(<SideBar clickOutside={clickOutside} />)
-    wrapper.simulate("clickOut", { preventDefault: jest.fn() })
+    wrapper.simulate("clickOut", {
+      preventDefault: jest.fn(),
+      target: { classList: { contains: jest.fn(() => false) } }
+    })
     expect(clickOutside).toHaveBeenCalled()
+  })
+
+  it("should not call clickOutside when user clicks on sidebar toggle", () => {
+    const clickOutside = jest.fn()
+    const wrapper = shallow(<SideBar clickOutside={clickOutside} />)
+    wrapper.simulate("clickOut", {
+      preventDefault: jest.fn(),
+      target: { classList: { contains: jest.fn(() => true) } }
+    })
+    expect(clickOutside).not.toHaveBeenCalled()
   })
 })

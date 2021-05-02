@@ -1,11 +1,11 @@
 /*
- * Minio Cloud Storage (C) 2018 Minio, Inc.
+ * MinIO Object Storage (c) 2021 MinIO, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *     http://www.apache.org/licenses/LICENSE-2.0
+ *      http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,14 +20,13 @@ import { ObjectsListContainer } from "../ObjectsListContainer"
 
 describe("ObjectsList", () => {
   it("should render without crashing", () => {
-    shallow(<ObjectsListContainer loadObjects={jest.fn()} />)
+    shallow(<ObjectsListContainer filteredObjects={[]} />)
   })
 
   it("should render ObjectsList with objects", () => {
     const wrapper = shallow(
       <ObjectsListContainer
-        objects={[{ name: "test1.jpg" }, { name: "test2.jpg" }]}
-        loadObjects={jest.fn()}
+        filteredObjects={[{ name: "test1.jpg" }, { name: "test2.jpg" }]}
       />
     )
     expect(wrapper.find("ObjectsList").length).toBe(1)
@@ -37,10 +36,14 @@ describe("ObjectsList", () => {
     ])
   })
 
-  it("should show the loading indicator at the bottom if there are more elements to display", () => {
+  it("should show the loading indicator when the objects are being loaded", () => {
     const wrapper = shallow(
-      <ObjectsListContainer currentBucket="test1" isTruncated={true} />
+      <ObjectsListContainer
+        currentBucket="test1"
+        filteredObjects={[]}
+        listLoading={true}
+      />
     )
-    expect(wrapper.find(".text-center").prop("style")).toHaveProperty("display", "block")
+    expect(wrapper.find(".loading").exists()).toBeTruthy()
   })
 })

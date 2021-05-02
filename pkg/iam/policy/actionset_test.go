@@ -1,18 +1,19 @@
-/*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
+// Copyright (c) 2015-2021 MinIO, Inc.
+//
+// This file is part of MinIO Object Storage stack
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 package iampolicy
 
@@ -128,17 +129,18 @@ func TestActionSetToSlice(t *testing.T) {
 
 func TestActionSetUnmarshalJSON(t *testing.T) {
 	testCases := []struct {
-		data           []byte
-		expectedResult ActionSet
-		expectErr      bool
+		data               []byte
+		expectedResult     ActionSet
+		expectUnmarshalErr bool
+		expectValidateErr  bool
 	}{
-		{[]byte(`"s3:PutObject"`), NewActionSet(PutObjectAction), false},
-		{[]byte(`["s3:PutObject"]`), NewActionSet(PutObjectAction), false},
-		{[]byte(`["s3:PutObject", "s3:GetObject"]`), NewActionSet(PutObjectAction, GetObjectAction), false},
-		{[]byte(`["s3:PutObject", "s3:GetObject", "s3:PutObject"]`), NewActionSet(PutObjectAction, GetObjectAction), false},
-		{[]byte(`[]`), NewActionSet(), true},           // Empty array.
-		{[]byte(`"foo"`), nil, true},                   // Invalid action.
-		{[]byte(`["s3:PutObject", "foo"]`), nil, true}, // Invalid action.
+		{[]byte(`"s3:PutObject"`), NewActionSet(PutObjectAction), false, false},
+		{[]byte(`["s3:PutObject"]`), NewActionSet(PutObjectAction), false, false},
+		{[]byte(`["s3:PutObject", "s3:GetObject"]`), NewActionSet(PutObjectAction, GetObjectAction), false, false},
+		{[]byte(`["s3:PutObject", "s3:GetObject", "s3:PutObject"]`), NewActionSet(PutObjectAction, GetObjectAction), false, false},
+		{[]byte(`[]`), NewActionSet(), true, false},           // Empty array.
+		{[]byte(`"foo"`), nil, false, true},                   // Invalid action.
+		{[]byte(`["s3:PutObject", "foo"]`), nil, false, true}, // Invalid action.
 	}
 
 	for i, testCase := range testCases {
@@ -146,11 +148,17 @@ func TestActionSetUnmarshalJSON(t *testing.T) {
 		err := json.Unmarshal(testCase.data, &result)
 		expectErr := (err != nil)
 
-		if expectErr != testCase.expectErr {
-			t.Fatalf("case %v: error: expected: %v, got: %v\n", i+1, testCase.expectErr, expectErr)
+		if expectErr != testCase.expectUnmarshalErr {
+			t.Fatalf("case %v: error during unmarshal: expected: %v, got: %v\n", i+1, testCase.expectUnmarshalErr, expectErr)
 		}
 
-		if !testCase.expectErr {
+		err = result.Validate()
+		expectErr = (err != nil)
+		if expectErr != testCase.expectValidateErr {
+			t.Fatalf("case %v: error during validation: expected: %v, got: %v\n", i+1, testCase.expectValidateErr, expectErr)
+		}
+
+		if !testCase.expectUnmarshalErr && !testCase.expectValidateErr {
 			if !reflect.DeepEqual(result, testCase.expectedResult) {
 				t.Fatalf("case %v: result: expected: %v, got: %v\n", i+1, testCase.expectedResult, result)
 			}
